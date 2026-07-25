@@ -87,6 +87,30 @@ En cada corrida:
 Por ejemplo, frecuencia 3 → recordatorios a las 8, 12 y 16hs; frecuencia 6 →
 8, 10, 12, 14, 16 y 18hs; frecuencia 12 → una vez por hora, de 8 a 19hs.
 
+## Onboarding guiado (edad y peso por encuesta)
+
+La primera vez que un número le escribe al bot (`persona` no existía), en vez
+de un único mensaje de bienvenida ahora es un flujo de 3 pasos, reusando la
+misma lógica de alta de `persona` que ya existía:
+
+1. Se crea la fila en `persona` (con `onboarding_step = 'awaiting_age'`) y se
+   manda un saludo corto + la encuesta de rango de edad.
+2. Al votar, se guarda `age_range`, se avanza a `onboarding_step =
+   'awaiting_weight'` y se manda la encuesta de rango de peso.
+3. Al votar esa, se guarda `weight_range`, `onboarding_step` pasa a `'done'`,
+   y recién ahí se manda el mensaje de instrucciones (foto de las comidas, etc.).
+
+Mientras `onboarding_step` no es `'done'`, cualquier mensaje que no sea el
+voto esperado (texto, foto, lo que sea) se ignora y se le reenvía la encuesta
+pendiente — no puede saltarse el paso. Los números que ya existían antes de
+esta feature quedan con `onboarding_step = 'done'` por default de columna, así
+que no se les interrumpe nada.
+
+Igual que con el agua, cada encuesta se resuelve mirando
+`persona.onboarding_step`: si no está en `'done'`, cualquier voto de encuesta
+se interpreta como edad o peso según corresponda; recién cuando el onboarding
+terminó, un voto de encuesta se interpreta como frecuencia de agua.
+
 ## Esquema SQL
 
 Inferido del código original — ajustar tipos/tamaños si tu DB real difiere.
@@ -102,6 +126,9 @@ CREATE TABLE persona (
     campo1     TINYINT(1)   NOT NULL DEFAULT 0,
     campo2     TINYINT(1)   NOT NULL DEFAULT 0,
     water_frequency SMALLINT UNSIGNED NULL DEFAULT NULL, -- NULL/0 = recordatorio de agua apagado; 3-12 = veces por día
+    age_range       VARCHAR(16) NULL DEFAULT NULL,        -- ej. "26-35" (ver MessageRouter::AGE_RANGE_OPTIONS)
+    weight_range    VARCHAR(16) NULL DEFAULT NULL,        -- ej. "70-80kg" (ver MessageRouter::WEIGHT_RANGE_OPTIONS)
+    onboarding_step VARCHAR(24) NOT NULL DEFAULT 'done',   -- 'awaiting_age' | 'awaiting_weight' | 'done'
     PRIMARY KEY (number),
     UNIQUE KEY uniq_identifier (identifier)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -132,6 +159,13 @@ anterior), migrala así:
 ```sql
 ALTER TABLE persona CHANGE setting water_frequency SMALLINT UNSIGNED NULL DEFAULT NULL;
 UPDATE persona SET water_frequency = NULL WHERE water_frequency = 0;
+
+ALTER TABLE persona
+    ADD COLUMN age_range VARCHAR(16) NULL DEFAULT NULL,
+    ADD COLUMN weight_range VARCHAR(16) NULL DEFAULT NULL,
+    ADD COLUMN onboarding_step VARCHAR(24) NOT NULL DEFAULT 'done';
+-- El default 'done' es a propósito: las personas que ya existían no deben
+-- quedar interrumpidas pidiéndoles edad/peso retroactivamente.
 ```
 
 ## Seguridad — pendiente antes de producción

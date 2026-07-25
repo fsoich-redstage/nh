@@ -9,13 +9,18 @@ use NutriHelper\Repository\NutritionRepository;
 use NutriHelper\Repository\PersonaRepository;
 
 /**
- * Decides what to do with an incoming message: onboard a new number, run the
- * meal-photo analysis, trigger/resolve the water-reminder frequency poll,
- * answer "ayuda", or fall back to the default instructions message.
+ * Decides what to do with an incoming message: onboard a new number (a short
+ * guided flow — age range, then weight range, both via WhatsApp polls — before
+ * anything else is available), run the meal-photo analysis, trigger/resolve
+ * the water-reminder frequency poll, answer "ayuda", or fall back to the
+ * default instructions message.
  */
 final class MessageRouter
 {
     private const MAX_MEALS_PER_DAY = 4;
+
+    private const AGE_RANGE_OPTIONS = ['18-25', '26-35', '36-45', '46-55', '56-65', '65+'];
+    private const WEIGHT_RANGE_OPTIONS = ['<60kg', '60-70kg', '70-80kg', '80-90kg', '90-100kg', '>100kg'];
 
     public function __construct(
         private readonly GreenApiClient $greenApi,
@@ -38,7 +43,26 @@ final class MessageRouter
         }
 
         if ($existsResult === false) {
-            $this->handleOnboarding($message->chatId);
+            $this->startOnboarding($message->chatId);
+            return;
+        }
+
+        $onboardingStep = $this->personas->getOnboardingStep($message->chatId);
+
+        if ($message->type === 'poll_vote') {
+            if ($onboardingStep !== PersonaRepository::ONBOARDING_DONE) {
+                $this->handleOnboardingPollVote($message, $onboardingStep);
+            } else {
+                $this->handleWaterPollVote($message);
+            }
+            return;
+        }
+
+        if ($onboardingStep !== PersonaRepository::ONBOARDING_DONE) {
+            // Ignore whatever they sent and gently steer them back to the
+            // pending onboarding question instead of processing it as a
+            // normal command/photo.
+            $this->resendOnboardingStep($message->chatId, $onboardingStep);
             return;
         }
 
@@ -52,28 +76,84 @@ final class MessageRouter
             return;
         }
 
-        if ($message->type === 'poll_vote') {
-            $this->handlePollVote($message);
-            return;
-        }
-
         // Other message types (e.g. status updates) are ignored.
     }
 
-    private function handleOnboarding(string $chatId): void
+    private function startOnboarding(string $chatId): void
     {
         $contact = $this->greenApi->getContactInfo($chatId) ?? [];
-        $name = $contact['name'] ?? 'No disponible';
-        $shortName = $contact['shortName'] ?? 'No disponible';
-        $pushname = $contact['pushname'] ?? 'No disponible';
+        $name = $contact['name'] ?? '';
+        $shortName = $contact['shortName'] ?? '';
+        $pushname = $contact['pushname'] ?? '';
 
         $this->personas->getOrCreateIdentifier($chatId, $name, $shortName, $pushname);
 
+        $greeting = $shortName !== '' ? $shortName : $name;
+
         $this->greenApi->sendMessage(
             $chatId,
-            'Bienvenido a NutriHelper ' . $name . '. Estas listo para cambiar tus habitos para siempre? '
-            . 'Mandame una foto de tus 4 comidas y te ayudo ...'
+            '¡Bienvenido a NutriHelper' . ($greeting !== '' ? ' ' . $greeting : '') . '! 🙌 '
+            . 'Antes de arrancar quiero conocerte un poco mejor, son solo dos preguntas rápidas.'
         );
+
+        $this->greenApi->sendPoll($chatId, '🎂 ¿En qué rango de edad estás?', self::AGE_RANGE_OPTIONS, false);
+    }
+
+    private function handleOnboardingPollVote(IncomingMessage $message, string $step): void
+    {
+        if ($message->body === '') {
+            // Empty vote (e.g. retracted selection) — nothing to persist yet.
+            return;
+        }
+
+        if ($step === PersonaRepository::ONBOARDING_AWAITING_AGE) {
+            if (!in_array($message->body, self::AGE_RANGE_OPTIONS, true)) {
+                return;
+            }
+
+            $this->personas->setAgeRange($message->chatId, $message->body);
+            $this->personas->setOnboardingStep($message->chatId, PersonaRepository::ONBOARDING_AWAITING_WEIGHT);
+
+            $this->greenApi->sendPoll(
+                $message->chatId,
+                '💪 ¡Genial! ¿Y tu rango de peso aproximado?',
+                self::WEIGHT_RANGE_OPTIONS,
+                false
+            );
+            return;
+        }
+
+        if ($step === PersonaRepository::ONBOARDING_AWAITING_WEIGHT) {
+            if (!in_array($message->body, self::WEIGHT_RANGE_OPTIONS, true)) {
+                return;
+            }
+
+            $this->personas->setWeightRange($message->chatId, $message->body);
+            $this->personas->setOnboardingStep($message->chatId, PersonaRepository::ONBOARDING_DONE);
+
+            $this->greenApi->sendMessage($message->chatId, implode("\n", [
+                '✅ ¡Listo, ya está todo configurado!',
+                'Mandame una foto de tus 4 comidas del día y te devuelvo los datos clave.',
+                'Escribí "ayuda" para ver tips, o "agua" para elegir tu recordatorio de hidratación.',
+            ]));
+        }
+    }
+
+    private function resendOnboardingStep(string $chatId, string $step): void
+    {
+        if ($step === PersonaRepository::ONBOARDING_AWAITING_AGE) {
+            $this->greenApi->sendPoll($chatId, '🎂 ¿En qué rango de edad estás?', self::AGE_RANGE_OPTIONS, false);
+            return;
+        }
+
+        if ($step === PersonaRepository::ONBOARDING_AWAITING_WEIGHT) {
+            $this->greenApi->sendPoll(
+                $chatId,
+                '💪 ¿Y tu rango de peso aproximado?',
+                self::WEIGHT_RANGE_OPTIONS,
+                false
+            );
+        }
     }
 
     private function handleText(IncomingMessage $message): void
@@ -118,7 +198,7 @@ final class MessageRouter
         );
     }
 
-    private function handlePollVote(IncomingMessage $message): void
+    private function handleWaterPollVote(IncomingMessage $message): void
     {
         if ($message->body === '') {
             // Empty vote (e.g. retracted selection) — nothing to persist.

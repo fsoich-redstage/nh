@@ -8,6 +8,10 @@ use NutriHelper\Http\GreenApiClient;
 
 final class PersonaRepository
 {
+    public const ONBOARDING_AWAITING_AGE = 'awaiting_age';
+    public const ONBOARDING_AWAITING_WEIGHT = 'awaiting_weight';
+    public const ONBOARDING_DONE = 'done';
+
     public function __construct(private readonly \PDO $conn)
     {
     }
@@ -126,11 +130,64 @@ final class PersonaRepository
         $identifier = $this->generateIdentifier();
 
         $insert = $this->conn->prepare(
-            'INSERT INTO persona (`number`, name, shortname, foto, identifier) VALUES (?, ?, ?, ?, ?)'
+            'INSERT INTO persona (`number`, name, shortname, foto, identifier, onboarding_step) VALUES (?, ?, ?, ?, ?, ?)'
         );
-        $insert->execute([$number, $name, $shortName, $photo, $identifier]);
+        $insert->execute([$number, $name, $shortName, $photo, $identifier, self::ONBOARDING_AWAITING_AGE]);
 
         return $identifier;
+    }
+
+    /**
+     * Current onboarding step for a chat. Defaults to "done" for rows that
+     * predate this column (no onboarding to interrupt for already-active users).
+     */
+    public function getOnboardingStep(string $chatId): string
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return self::ONBOARDING_DONE;
+        }
+
+        $stmt = $this->conn->prepare(
+            "SELECT COALESCE(onboarding_step, '" . self::ONBOARDING_DONE . "') FROM persona WHERE `number` = ? LIMIT 1"
+        );
+        $stmt->execute([$number]);
+        $value = $stmt->fetchColumn();
+
+        return $value !== false ? (string)$value : self::ONBOARDING_DONE;
+    }
+
+    public function setOnboardingStep(string $chatId, string $step): void
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return;
+        }
+
+        $stmt = $this->conn->prepare('UPDATE persona SET onboarding_step = ? WHERE `number` = ?');
+        $stmt->execute([$step, $number]);
+    }
+
+    public function setAgeRange(string $chatId, string $ageRange): void
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return;
+        }
+
+        $stmt = $this->conn->prepare('UPDATE persona SET age_range = ? WHERE `number` = ?');
+        $stmt->execute([$ageRange, $number]);
+    }
+
+    public function setWeightRange(string $chatId, string $weightRange): void
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return;
+        }
+
+        $stmt = $this->conn->prepare('UPDATE persona SET weight_range = ? WHERE `number` = ?');
+        $stmt->execute([$weightRange, $number]);
     }
 
     /**
