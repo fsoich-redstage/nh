@@ -65,6 +65,43 @@ final class NutritionRepository
     }
 
     /**
+     * @return array{0:string,1:string} [start, end) of "last week" (the Monday-to-Sunday
+     *                                   week before the current one, America/Argentina/Buenos_Aires),
+     *                                   expressed as UTC datetime strings.
+     */
+    private function lastWeekUtcBounds(): array
+    {
+        $tzLocal = new \DateTimeZone('America/Argentina/Buenos_Aires');
+        $tzUtc = new \DateTimeZone('UTC');
+
+        $today = new \DateTime('today', $tzLocal);
+        $isoDayOfWeek = (int)$today->format('N'); // 1 = Monday ... 7 = Sunday
+        $thisMonday = (clone $today)->modify('-' . ($isoDayOfWeek - 1) . ' days');
+        $lastMonday = (clone $thisMonday)->modify('-7 days');
+
+        return [
+            (clone $lastMonday)->setTimezone($tzUtc)->format('Y-m-d H:i:s'),
+            (clone $thisMonday)->setTimezone($tzUtc)->format('Y-m-d H:i:s'),
+        ];
+    }
+
+    /**
+     * Whether this identifier logged at least one meal during last week
+     * (Monday-Sunday) — gates the Monday "let's keep it up this week" nudge.
+     */
+    public function hadEntriesLastWeek(string $identifier): bool
+    {
+        [$startUtc, $endUtc] = $this->lastWeekUtcBounds();
+
+        $stmt = $this->conn->prepare(
+            'SELECT 1 FROM nutri WHERE identifier = ? AND datetime >= ? AND datetime < ? LIMIT 1'
+        );
+        $stmt->execute([$identifier, $startUtc, $endUtc]);
+
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
      * Counts today's entries (America/Argentina/Buenos_Aires calendar day) for
      * a given identifier — used to enforce the 4-meals-per-day limit.
      */

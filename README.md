@@ -14,6 +14,8 @@ bin/send_daily_summary.php    # script de cron (correr cada hora): a la hora con
                                # resumen diario (una sola llamada a OpenAI por persona) y consejo para mañana
 bin/send_meal_reminder.php    # script de cron (correr cada hora): pregunta por poll si te olvidaste
                                # de una comida, según tu hora habitual de esa comida
+bin/send_monday_kickoff.php   # script de cron (correr cada hora, solo actúa los lunes): envión de
+                               # arranque de semana para quien registró comidas la semana pasada
 public/webhook.php            # webhook de Green API (onboarding, comandos de texto, análisis de imagen)
 public/index.php              # front door del sitio (?identifier=XXXX): historial real o landing promocional
 public/photos/                # fotos servidas públicamente (mismo esquema que producción), gitignored
@@ -59,6 +61,21 @@ logs/                         # logs de la app (gitignored)
    varias veces esa hora.
 7. Programar `bin/send_meal_reminder.php` también cada hora:
    `0 * * * * php /ruta/a/nutri-helper/bin/send_meal_reminder.php`.
+8. Programar `bin/send_monday_kickoff.php` también cada hora (solo hace algo
+   los lunes): `0 * * * * php /ruta/a/nutri-helper/bin/send_monday_kickoff.php`.
+
+## Envión de arranque de semana (lunes)
+
+Cada hora, `bin/send_monday_kickoff.php` chequea si es lunes (huso
+`America/Argentina/Buenos_Aires`); si no lo es, no hace nada. Los lunes, para
+cada persona activa que haya registrado al menos una comida **la semana
+pasada** (lunes a domingo anterior — `NutritionRepository::hadEntriesLastWeek`),
+manda un único mensaje invitándola a seguir cargando sus comidas esta semana,
+programado a la hora en la que esa persona suele registrar su desayuno
+(mismo cálculo de promedio histórico que usa el recordatorio de comidas,
+redondeado; si no tiene historial de desayuno, usa el default de
+`MealWindows::defaultHour('DESAYUNO')`). No se manda a quien no tuvo actividad
+la semana pasada.
 
 ## Recordatorio de comida olvidada
 
