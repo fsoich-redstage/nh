@@ -238,6 +238,80 @@ final class PersonaRepository
         return $stmt->fetchAll();
     }
 
+    /**
+     * Everyone past onboarding — the pool eligible for the missed-meal reminder.
+     *
+     * @return array<int,array{number:string,identifier:string}>
+     */
+    public function findActivePersonas(): array
+    {
+        $stmt = $this->conn->query(
+            "SELECT `number`, identifier FROM persona WHERE COALESCE(onboarding_step, '" . self::ONBOARDING_DONE . "') = '" . self::ONBOARDING_DONE . "'"
+        );
+
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Which meal type's "did you forget?" poll is currently outstanding for
+     * this chat, if any — set right before sending that poll, cleared once
+     * the vote is processed. Distinguishes this poll from the water-frequency
+     * one when a poll_vote webhook comes in.
+     */
+    public function getPendingMealReminder(string $chatId): ?string
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return null;
+        }
+
+        $stmt = $this->conn->prepare('SELECT pending_meal_reminder FROM persona WHERE `number` = ? LIMIT 1');
+        $stmt->execute([$number]);
+        $value = $stmt->fetchColumn();
+
+        return ($value !== false && $value !== null && $value !== '') ? (string)$value : null;
+    }
+
+    public function setPendingMealReminder(string $chatId, ?string $mealType): void
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return;
+        }
+
+        $stmt = $this->conn->prepare('UPDATE persona SET pending_meal_reminder = ? WHERE `number` = ?');
+        $stmt->execute([$mealType, $number]);
+    }
+
+    /**
+     * Which meal type someone is currently expected to describe by plain
+     * text, after choosing "comí pero me olvidé de mandar la foto".
+     */
+    public function getPendingTextMeal(string $chatId): ?string
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return null;
+        }
+
+        $stmt = $this->conn->prepare('SELECT pending_text_meal FROM persona WHERE `number` = ? LIMIT 1');
+        $stmt->execute([$number]);
+        $value = $stmt->fetchColumn();
+
+        return ($value !== false && $value !== null && $value !== '') ? (string)$value : null;
+    }
+
+    public function setPendingTextMeal(string $chatId, ?string $mealType): void
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return;
+        }
+
+        $stmt = $this->conn->prepare('UPDATE persona SET pending_text_meal = ? WHERE `number` = ?');
+        $stmt->execute([$mealType, $number]);
+    }
+
     private function generateIdentifier(int $length = 6): string
     {
         $chars = 'AFHJKRUXZ123456789';

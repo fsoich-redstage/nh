@@ -56,12 +56,16 @@ final class NutritionRepository
         [$startUtc, $endUtc] = $this->todayUtcBounds();
 
         $hasConsejo = Database::tableHasColumn($this->conn, 'nutri', 'consejo_actual');
+        $hasComida = Database::tableHasColumn($this->conn, 'nutri', 'comida');
         $fields = [
             'datetime', 'descripcion',
             'calorias', 'proteinas', 'grasas', 'carbohidratos',
         ];
         if ($hasConsejo) {
             $fields[] = 'consejo_actual';
+        }
+        if ($hasComida) {
+            $fields[] = 'comida';
         }
 
         $sql = sprintf(
@@ -73,6 +77,55 @@ final class NutritionRepository
         $stmt->execute([$identifier, $startUtc, $endUtc]);
 
         return $stmt->fetchAll();
+    }
+
+    /**
+     * Whether a given meal type was already logged today for this identifier
+     * — used to skip the "did you forget?" reminder once it's covered.
+     */
+    public function hasMealTypeToday(string $identifier, string $mealType): bool
+    {
+        [$startUtc, $endUtc] = $this->todayUtcBounds();
+
+        $stmt = $this->conn->prepare(
+            'SELECT 1 FROM nutri
+             WHERE identifier = ? AND comida = ? AND datetime >= ? AND datetime < ?
+             LIMIT 1'
+        );
+        $stmt->execute([$identifier, $mealType, $startUtc, $endUtc]);
+
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
+     * Average local hour (with fractional minutes) at which this identifier
+     * has logged a given meal type via photo, over their most recent entries.
+     * Text-only entries (foto = '') are excluded since those can be logged
+     * well after the fact and would skew the average. Returns null when there
+     * isn't enough history yet.
+     */
+    public function findAverageMealHour(string $identifier, string $mealType, int $sampleSize = 30): ?float
+    {
+        $stmt = $this->conn->prepare(
+            "SELECT datetime FROM nutri
+             WHERE identifier = ? AND comida = ? AND foto <> ''
+             ORDER BY datetime DESC
+             LIMIT " . (int)$sampleSize
+        );
+        $stmt->execute([$identifier, $mealType]);
+        $rows = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+
+        if ($rows === []) {
+            return null;
+        }
+
+        $sum = 0.0;
+        foreach ($rows as $datetime) {
+            $local = (new \DateTime((string)$datetime))->modify('-3 hours');
+            $sum += (float)$local->format('H') + ((float)$local->format('i') / 60);
+        }
+
+        return $sum / count($rows);
     }
 
     /**
@@ -114,7 +167,8 @@ final class NutritionRepository
      *     grasas_label:string,
      *     carbohidratos_label:string,
      *     source?:string,
-     *     consejo_actual?:string
+     *     consejo_actual?:string,
+     *     comida?:string
      * } $record
      */
     public function insert(array $record): string
@@ -126,6 +180,7 @@ final class NutritionRepository
 
         $hasSource = Database::tableHasColumn($this->conn, 'nutri', 'source');
         $hasConsejo = Database::tableHasColumn($this->conn, 'nutri', 'consejo_actual');
+        $hasComida = Database::tableHasColumn($this->conn, 'nutri', 'comida');
 
         $columns = [
             'foto', 'descripcion', 'datetime', 'identifier',
@@ -146,6 +201,11 @@ final class NutritionRepository
         if ($hasConsejo) {
             $columns[] = 'consejo_actual';
             $values[] = $record['consejo_actual'] ?? '';
+        }
+
+        if ($hasComida) {
+            $columns[] = 'comida';
+            $values[] = $record['comida'] ?? '';
         }
 
         // datetime uses NOW() rather than a bound placeholder.
@@ -178,6 +238,7 @@ final class NutritionRepository
     public function fetchEntriesForIdentifier(string $identifier): array
     {
         $hasSource = Database::tableHasColumn($this->conn, 'nutri', 'source');
+        $hasComida = Database::tableHasColumn($this->conn, 'nutri', 'comida');
 
         $fields = [
             'foto', 'descripcion', 'datetime',
@@ -186,6 +247,9 @@ final class NutritionRepository
         ];
         if ($hasSource) {
             $fields[] = 'source';
+        }
+        if ($hasComida) {
+            $fields[] = 'comida';
         }
 
         $sql = sprintf(

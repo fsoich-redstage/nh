@@ -11,9 +11,10 @@ use NutriHelper\Repository\PersonaRepository;
 /**
  * Decides what to do with an incoming message: onboard a new number (a short
  * guided flow — age range, then weight range, both via WhatsApp polls — before
- * anything else is available), run the meal-photo analysis, trigger/resolve
- * the water-reminder frequency poll, answer "ayuda", or fall back to the
- * default instructions message.
+ * anything else is available), run the meal-photo analysis, resolve a missed
+ * -meal reminder poll and the optional text-only follow-up it can trigger,
+ * trigger/resolve the water-reminder frequency poll, answer "ayuda", or fall
+ * back to the default instructions message.
  */
 final class MessageRouter
 {
@@ -52,9 +53,16 @@ final class MessageRouter
         if ($message->type === 'poll_vote') {
             if ($onboardingStep !== PersonaRepository::ONBOARDING_DONE) {
                 $this->handleOnboardingPollVote($message, $onboardingStep);
-            } else {
-                $this->handleWaterPollVote($message);
+                return;
             }
+
+            $pendingMealReminder = $this->personas->getPendingMealReminder($message->chatId);
+            if ($pendingMealReminder !== null) {
+                $this->handleMissedMealPollVote($message, $pendingMealReminder);
+                return;
+            }
+
+            $this->handleWaterPollVote($message);
             return;
         }
 
@@ -64,6 +72,14 @@ final class MessageRouter
             // normal command/photo.
             $this->resendOnboardingStep($message->chatId, $onboardingStep);
             return;
+        }
+
+        if ($message->type === 'text') {
+            $pendingTextMeal = $this->personas->getPendingTextMeal($message->chatId);
+            if ($pendingTextMeal !== null) {
+                $this->handleTextMealEntry($message, $pendingTextMeal);
+                return;
+            }
         }
 
         if ($message->type === 'image') {
@@ -244,6 +260,10 @@ final class MessageRouter
             return;
         }
 
+        $tzLocal = new \DateTimeZone('America/Argentina/Buenos_Aires');
+        $mealType = MealWindows::classifyHour((int)(new \DateTime('now', $tzLocal))->format('H'));
+        $nextMealPhrase = MealWindows::nextMealPhrase($mealType);
+
         try {
             $imageBytes = @file_get_contents($downloadUrl);
             if ($imageBytes === false) {
@@ -253,66 +273,149 @@ final class MessageRouter
 
             $analysisText = '';
             try {
-                $analysisText = $this->openAi->analyzeMeal($message->body, $base64);
+                $analysisText = $this->openAi->analyzeMeal($message->body, $base64, $mealType, $nextMealPhrase);
             } catch (\Throwable) {
                 // Continue with zeros/empty analysis rather than failing the whole flow.
             }
 
-            $nutritionValues = $analysisText !== '' ? $this->parser->extract($analysisText) : null;
-
-            $calories = (int)($nutritionValues['calories']['value'] ?? 0);
-            $protein = (int)($nutritionValues['protein']['value'] ?? 0);
-            $carbs = (int)($nutritionValues['carbs']['value'] ?? 0);
-            $fat = (int)($nutritionValues['fat']['value'] ?? 0);
-
-            $calLabel = $nutritionValues['calories']['label'] ?? ($calories . ' kcal');
-            $proLabel = $nutritionValues['protein']['label'] ?? ($protein . ' g');
-            $carbLabel = $nutritionValues['carbs']['label'] ?? ($carbs . ' g');
-            $fatLabel = $nutritionValues['fat']['label'] ?? ($fat . ' g');
-
-            $noteFromAnalysis = $analysisText !== '' ? $this->parser->extractNote($analysisText) : '';
-            $userText = trim($message->body);
-            $description = $userText !== '' ? $userText : ($noteFromAnalysis !== '' ? $noteFromAnalysis : 'Imagen sin descripción');
-            $noteForMessage = $noteFromAnalysis !== '' ? $noteFromAnalysis : $userText;
-
-            $advices = $analysisText !== '' ? $this->parser->extractAdvices($analysisText) : ['actual' => '', 'proxima' => ''];
-
             $fileKey = $this->images->store($identifier, $base64);
 
-            $this->nutrition->insert([
-                'foto'                => $fileKey,
-                'descripcion'         => $description,
-                'identifier'          => $identifier,
-                'calorias'            => $calories,
-                'proteinas'           => $protein,
-                'grasas'              => $fat,
-                'carbohidratos'       => $carbs,
-                'calorias_label'      => (string)$calLabel,
-                'proteinas_label'     => (string)$proLabel,
-                'grasas_label'        => (string)$fatLabel,
-                'carbohidratos_label' => (string)$carbLabel,
-                'source'              => 'nutri-helper',
-                'consejo_actual'      => $advices['actual'],
-            ]);
-
-            $reply = [];
-            if ($noteForMessage !== '') {
-                $reply[] = $noteForMessage;
-            }
-            if ($advices['actual'] !== '') {
-                $reply[] = 'Consejo actual: ' . $advices['actual'];
-            }
-            if ($advices['proxima'] !== '') {
-                $reply[] = 'Consejo próxima comida: ' . $advices['proxima'];
-            }
-            $reply[] = '';
-            $reply[] = "Calorías: {$calories} kcal\nProteínas: {$protein} g\nCarbohidratos: {$carbs} g\nGrasas: {$fat} g";
-            $reply[] = 'Tu historial: ' . rtrim($this->landingBaseUrl, '/') . '/?identifier=' . $identifier;
-
-            $this->greenApi->sendMessage($message->chatId, implode("\n", array_filter($reply, static fn ($v) => $v !== null)));
+            $this->finalizeMealEntry($message->chatId, $identifier, $mealType, $fileKey, $message->body, $analysisText);
         } catch (\Throwable $e) {
             error_log('Nutri Helper: fallo procesando imagen: ' . $e->getMessage());
             $this->greenApi->sendMessage($message->chatId, 'No pude procesar tu imagen para guardarla.');
         }
+    }
+
+    /**
+     * Sent by bin/send_meal_reminder.php when someone answers "comí pero me
+     * olvidé de mandar la foto" — they're expected to reply next with a plain
+     * text description of what they ate.
+     */
+    private function handleMissedMealPollVote(IncomingMessage $message, string $mealType): void
+    {
+        if ($message->body === '') {
+            return;
+        }
+
+        $this->personas->setPendingMealReminder($message->chatId, null);
+
+        if ($message->body === 'Comí, me olvidé de mandar la foto') {
+            $this->personas->setPendingTextMeal($message->chatId, $mealType);
+            $this->greenApi->sendMessage(
+                $message->chatId,
+                '✍️ Contame por texto qué comiste en ' . MealWindows::skipOptionLabel($mealType)
+                . ' y te calculo los datos igual, sin foto.'
+            );
+            return;
+        }
+
+        if ($message->body === 'No comí' || $message->body === MealWindows::skipOptionLabel($mealType)) {
+            $this->greenApi->sendMessage($message->chatId, '¡Todo bien! Cuando comas algo mandame la foto o el texto.');
+        }
+    }
+
+    /**
+     * Processes a meal reported purely as text (no photo) — same analysis
+     * and storage as a photo, but with foto='' so the history page shows it
+     * without an image.
+     */
+    private function handleTextMealEntry(IncomingMessage $message, string $mealType): void
+    {
+        $identifier = $this->personas->ensurePerson($this->greenApi, $message->chatId);
+        $this->personas->setPendingTextMeal($message->chatId, null);
+
+        if ($this->nutrition->countTodayForIdentifier($identifier) >= self::MAX_MEALS_PER_DAY) {
+            $this->greenApi->sendMessage(
+                $message->chatId,
+                '⚠️ Ya registraste el máximo de ' . self::MAX_MEALS_PER_DAY . ' comidas hoy. '
+                . 'No se pueden insertar más registros por día.'
+            );
+            return;
+        }
+
+        $description = trim($message->body);
+        if ($description === '') {
+            $this->greenApi->sendMessage($message->chatId, 'No entendí qué comiste, ¿me lo contás de nuevo?');
+            return;
+        }
+
+        $nextMealPhrase = MealWindows::nextMealPhrase($mealType);
+
+        try {
+            $analysisText = $this->openAi->analyzeMealFromText($description, $mealType, $nextMealPhrase);
+        } catch (\Throwable $e) {
+            error_log('Nutri Helper: fallo analizando comida por texto: ' . $e->getMessage());
+            $this->greenApi->sendMessage($message->chatId, 'No pude procesar esa descripción, intentá de nuevo.');
+            return;
+        }
+
+        $this->finalizeMealEntry($message->chatId, $identifier, $mealType, '', $description, $analysisText);
+    }
+
+    /**
+     * Shared by handleImage() and handleTextMealEntry(): parses the model's
+     * analysis, stores the nutri record (foto='' for text-only entries), and
+     * sends the reply with note/advice/macros/history link.
+     */
+    private function finalizeMealEntry(
+        string $chatId,
+        string $identifier,
+        string $mealType,
+        string $foto,
+        string $userText,
+        string $analysisText
+    ): void {
+        $nutritionValues = $analysisText !== '' ? $this->parser->extract($analysisText) : null;
+
+        $calories = (int)($nutritionValues['calories']['value'] ?? 0);
+        $protein = (int)($nutritionValues['protein']['value'] ?? 0);
+        $carbs = (int)($nutritionValues['carbs']['value'] ?? 0);
+        $fat = (int)($nutritionValues['fat']['value'] ?? 0);
+
+        $calLabel = $nutritionValues['calories']['label'] ?? ($calories . ' kcal');
+        $proLabel = $nutritionValues['protein']['label'] ?? ($protein . ' g');
+        $carbLabel = $nutritionValues['carbs']['label'] ?? ($carbs . ' g');
+        $fatLabel = $nutritionValues['fat']['label'] ?? ($fat . ' g');
+
+        $noteFromAnalysis = $analysisText !== '' ? $this->parser->extractNote($analysisText) : '';
+        $userText = trim($userText);
+        $description = $userText !== '' ? $userText : ($noteFromAnalysis !== '' ? $noteFromAnalysis : 'Comida sin descripción');
+        $noteForMessage = $noteFromAnalysis !== '' ? $noteFromAnalysis : $userText;
+
+        $advices = $analysisText !== '' ? $this->parser->extractAdvices($analysisText) : ['actual' => '', 'proxima' => ''];
+
+        $this->nutrition->insert([
+            'foto'                => $foto,
+            'descripcion'         => $description,
+            'identifier'          => $identifier,
+            'calorias'            => $calories,
+            'proteinas'           => $protein,
+            'grasas'              => $fat,
+            'carbohidratos'       => $carbs,
+            'calorias_label'      => (string)$calLabel,
+            'proteinas_label'     => (string)$proLabel,
+            'grasas_label'        => (string)$fatLabel,
+            'carbohidratos_label' => (string)$carbLabel,
+            'source'              => 'nutri-helper',
+            'consejo_actual'      => $advices['actual'],
+            'comida'              => $mealType,
+        ]);
+
+        $reply = [];
+        if ($noteForMessage !== '') {
+            $reply[] = $noteForMessage;
+        }
+        if ($advices['actual'] !== '') {
+            $reply[] = 'Consejo actual: ' . $advices['actual'];
+        }
+        if ($advices['proxima'] !== '') {
+            $reply[] = 'Consejo próxima comida: ' . $advices['proxima'];
+        }
+        $reply[] = '';
+        $reply[] = "Calorías: {$calories} kcal\nProteínas: {$protein} g\nCarbohidratos: {$carbs} g\nGrasas: {$fat} g";
+        $reply[] = 'Tu historial: ' . rtrim($this->landingBaseUrl, '/') . '/?identifier=' . $identifier;
+
+        $this->greenApi->sendMessage($chatId, implode("\n", array_filter($reply, static fn ($v) => $v !== null)));
     }
 }

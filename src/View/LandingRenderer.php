@@ -90,7 +90,8 @@ HTML;
         $dias = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
 
         foreach ($entries as $entry) {
-            $fotoPath = $imagePublicPath . '/' . (string)($entry['foto'] ?? '') . '.jpg';
+            $foto = (string)($entry['foto'] ?? '');
+            $fotoPath = $foto !== '' ? $imagePublicPath . '/' . $foto . '.jpg' : '';
             $desc = htmlspecialchars((string)($entry['descripcion'] ?? ''), ENT_QUOTES, 'UTF-8');
 
             $labCal = str_replace('Calorías', 'Cal', (string)($entry['calorias_label'] ?? ''));
@@ -123,7 +124,10 @@ HTML;
             $ampm = ((int)$fecha->format('H') < 12) ? 'AM' : 'PM';
             $ts = $fecha->getTimestamp();
 
-            [$comida, $theme] = $this->mealThemeForHour((int)$fecha->format('H'));
+            $storedComida = (string)($entry['comida'] ?? '');
+            [$comida, $theme] = $storedComida !== ''
+                ? [$storedComida, $this->themeForMealType($storedComida)]
+                : $this->mealThemeForHour((int)$fecha->format('H'));
 
             $html .= <<<CARD
   <div class="card {$theme}" data-comida="{$comida}" data-ts="{$ts}">
@@ -149,7 +153,14 @@ HTML;
         </div>
       </div>
     </div>
-    <img src="{$fotoPath}" alt="Foto {$desc}" loading="lazy" />
+
+CARD;
+            if ($fotoPath !== '') {
+                $html .= "    <img src=\"{$fotoPath}\" alt=\"Foto {$desc}\" loading=\"lazy\" />\n";
+            } else {
+                $html .= "    <div class=\"descripcion\" style=\"opacity:.75;font-size:.85rem\">📝 Cargado por texto (sin foto)</div>\n";
+            }
+            $html .= <<<CARD
     <div class="descripcion">{$desc}</div>
     <div class="macros">
 
@@ -182,6 +193,16 @@ CARD;
             $hour >= 12 && $hour < 15 => ['ALMUERZO', 'theme-almuerzo'],
             $hour >= 15 && $hour < 19 => ['MERIENDA', 'theme-merienda'],
             default                   => ['CENA', 'theme-cena'],
+        };
+    }
+
+    private function themeForMealType(string $comida): string
+    {
+        return match ($comida) {
+            'DESAYUNO' => 'theme-desayuno',
+            'ALMUERZO' => 'theme-almuerzo',
+            'MERIENDA' => 'theme-merienda',
+            default    => 'theme-cena',
         };
     }
 

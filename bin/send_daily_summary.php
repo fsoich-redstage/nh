@@ -6,6 +6,7 @@ require __DIR__ . '/../src/autoload.php';
 use NutriHelper\Config;
 use NutriHelper\Db\Database;
 use NutriHelper\Domain\EventDeduplicator;
+use NutriHelper\Domain\MealWindows;
 use NutriHelper\Http\GreenApiClient;
 use NutriHelper\Http\OpenAiClient;
 use NutriHelper\Repository\NutritionRepository;
@@ -63,12 +64,10 @@ foreach ($targets as $target) {
 
         $hora = (new DateTime((string)($entry['datetime'] ?? 'now')))->modify('-3 hours')->format('H:i');
         $hour = (int)substr($hora, 0, 2);
-        $comida = match (true) {
-            $hour >= 8 && $hour < 12  => 'DESAYUNO',
-            $hour >= 12 && $hour < 15 => 'ALMUERZO',
-            $hour >= 15 && $hour < 19 => 'MERIENDA',
-            default                   => 'CENA',
-        };
+        // Prefer the meal type stored with the entry (accurate even for a
+        // late text entry logged outside its natural window); fall back to
+        // classifying by hour for rows from before that column existed.
+        $comida = (string)($entry['comida'] ?? '') !== '' ? (string)$entry['comida'] : MealWindows::classifyHour($hour);
 
         $meals[] = [
             'comida'        => $comida,

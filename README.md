@@ -12,6 +12,8 @@ bin/send_water_reminder.php   # script de cron (correr cada hora): envía el rec
                                # a quienes tengan water_frequency seteado, solo en su hora programada
 bin/send_daily_summary.php    # script de cron (correr cada hora): a la hora configurada, manda el
                                # resumen diario (una sola llamada a OpenAI por persona) y consejo para mañana
+bin/send_meal_reminder.php    # script de cron (correr cada hora): pregunta por poll si te olvidaste
+                               # de una comida, según tu hora habitual de esa comida
 public/webhook.php            # webhook de Green API (onboarding, comandos de texto, análisis de imagen)
 public/index.php              # front door del sitio (?identifier=XXXX): historial real o landing promocional
 public/photos/                # fotos servidas públicamente (mismo esquema que producción), gitignored
@@ -55,6 +57,40 @@ logs/                         # logs de la app (gitignored)
    Solo manda algo cuando la hora local coincide con `NUTRI_DAILY_SUMMARY_HOUR`
    (default 22hs), y como máximo una vez por día aunque el cron se dispare
    varias veces esa hora.
+7. Programar `bin/send_meal_reminder.php` también cada hora:
+   `0 * * * * php /ruta/a/nutri-helper/bin/send_meal_reminder.php`.
+
+## Recordatorio de comida olvidada
+
+Cada hora, `bin/send_meal_reminder.php` recorre las 4 comidas (desayuno,
+almuerzo, merienda, cena) de cada persona activa. Para cada una:
+
+1. Si la hora actual está fuera de la ventana propia de esa comida
+   (desayuno 8-12hs, almuerzo 12-15hs, merienda 15-19hs, cena 19-24hs), no
+   hace nada — nunca pregunta por el desayuno a la noche, por ejemplo.
+2. Si ya registró esa comida hoy (columna `nutri.comida`, no inferida por
+   hora — así una comida cargada tarde por texto no se confunde con otra),
+   no pregunta.
+3. Si no, calcula la "hora objetivo" para esa persona y esa comida:
+   el promedio histórico de a qué hora la registra (solo con fotos, últimos
+   30 registros — `NutritionRepository::findAverageMealHour`), o un default
+   razonable (ej. 9hs para desayuno) si todavía no tiene historial.
+4. Cuando la hora actual coincide con esa hora objetivo, manda **un solo**
+   poll ese día para esa comida (dedupe diario por identifier+comida):
+   *"¿Te olvidaste de mandar tu comida?"* con 3 opciones:
+   - **No comí**
+   - **Me salteé este/a \<comida\>** (con concordancia de género correcta)
+   - **Comí, me olvidé de mandar la foto**
+
+Si contesta que comió pero se olvidó de mandar la foto, el bot le pide que
+cuente por texto qué comió (`persona.pending_text_meal`), y ese texto se
+procesa igual que una foto: **una llamada a OpenAI sin imagen**
+(`OpenAiClient::analyzeMealFromText`, mismo prompt que el de foto pero
+aclarando que el consejo se basa en la descripción, no en una imagen) —
+calcula calorías/proteínas/carbohidratos/grasas y el consejo, y lo guarda
+con `foto = ''`. En `public/index.php` esas entradas se muestran igual que
+las demás (con su tema de color por comida, usando `nutri.comida` en vez de
+inferir por hora) pero sin `<img>`, con un aviso de "cargado por texto".
 
 ## Resumen de fin de día
 
@@ -152,6 +188,8 @@ CREATE TABLE persona (
     age_range       VARCHAR(16) NULL DEFAULT NULL,        -- ej. "26-35" (ver MessageRouter::AGE_RANGE_OPTIONS)
     weight_range    VARCHAR(16) NULL DEFAULT NULL,        -- ej. "70-80kg" (ver MessageRouter::WEIGHT_RANGE_OPTIONS)
     onboarding_step VARCHAR(24) NOT NULL DEFAULT 'done',   -- 'awaiting_age' | 'awaiting_weight' | 'done'
+    pending_meal_reminder VARCHAR(16) NULL DEFAULT NULL,   -- comida cuyo poll "¿te olvidaste?" está pendiente de respuesta
+    pending_text_meal     VARCHAR(16) NULL DEFAULT NULL,   -- comida que va a describir por texto (eligió "comí pero me olvidé")
     PRIMARY KEY (number),
     UNIQUE KEY uniq_identifier (identifier)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -172,6 +210,7 @@ CREATE TABLE nutri (
     carbohidratos_label  VARCHAR(64) NOT NULL DEFAULT '',
     source               VARCHAR(32) NOT NULL DEFAULT '',
     consejo_actual       TEXT NULL,                        -- consejo dado en el momento de esa comida; insumo del resumen diario
+    comida               VARCHAR(16) NULL DEFAULT NULL,     -- DESAYUNO|ALMUERZO|MERIENDA|CENA; explícito (no inferido por hora)
     PRIMARY KEY (id),
     KEY idx_identifier_datetime (identifier, datetime)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -191,7 +230,13 @@ ALTER TABLE persona
 -- El default 'done' es a propósito: las personas que ya existían no deben
 -- quedar interrumpidas pidiéndoles edad/peso retroactivamente.
 
-ALTER TABLE nutri ADD COLUMN consejo_actual TEXT NULL;
+ALTER TABLE persona
+    ADD COLUMN pending_meal_reminder VARCHAR(16) NULL DEFAULT NULL,
+    ADD COLUMN pending_text_meal VARCHAR(16) NULL DEFAULT NULL;
+
+ALTER TABLE nutri
+    ADD COLUMN consejo_actual TEXT NULL,
+    ADD COLUMN comida VARCHAR(16) NULL DEFAULT NULL;
 ```
 
 ## Seguridad — pendiente antes de producción

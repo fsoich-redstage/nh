@@ -16,18 +16,9 @@ final class OpenAiClient
     {
     }
 
-    public function analyzeMeal(string $description, string $imageBase64): string
+    public function analyzeMeal(string $description, string $imageBase64, string $mealName, string $nextMealName): string
     {
-        [$mealName, $nextMealName] = $this->currentMealSlot();
-
-        $text = 'Haz un análisis nutricional resumido que incluya: nota (unas palabras sobre el análisis) y luego '
-            . 'calorías aproximadas, proteínas, carbohidratos y grasas SOLO TOTALES SUMADOS NO OTROS VALORES de este/a '
-            . $mealName . ' que contiene ' . $description . '. '
-            . 'Responde en el siguiente formato exacto, una línea por ítem y en este orden: '
-            . 'Nota: … Calorías: … kcal Proteínas: … g Carbohidratos: … g Grasas: … g '
-            . 'Consejo actual: … Consejo próxima comida (' . trim($nextMealName) . '): …. '
-            . 'El consejo actual debe basarse en la foto; el de la próxima comida debe ser específico para '
-            . trim($nextMealName) . '. No uses doble salto de linea';
+        $text = $this->buildMealPrompt($mealName, $nextMealName, $description, true);
 
         return $this->callResponsesApi([
             ['type' => 'input_text', 'text' => $text],
@@ -37,6 +28,31 @@ final class OpenAiClient
                 'detail' => 'high',
             ],
         ]);
+    }
+
+    /**
+     * Same analysis, but from a plain-text description with no photo — used
+     * when someone reports a meal they forgot to log in the moment.
+     */
+    public function analyzeMealFromText(string $description, string $mealName, string $nextMealName): string
+    {
+        $text = $this->buildMealPrompt($mealName, $nextMealName, $description, false);
+
+        return $this->callResponsesApi([['type' => 'input_text', 'text' => $text]]);
+    }
+
+    private function buildMealPrompt(string $mealName, string $nextMealName, string $description, bool $hasPhoto): string
+    {
+        $basis = $hasPhoto ? 'debe basarse en la foto' : 'debe basarse en la descripción de texto (no hay foto)';
+
+        return 'Haz un análisis nutricional resumido que incluya: nota (unas palabras sobre el análisis) y luego '
+            . 'calorías aproximadas, proteínas, carbohidratos y grasas SOLO TOTALES SUMADOS NO OTROS VALORES de este/a '
+            . $mealName . ' que contiene ' . $description . '. '
+            . 'Responde en el siguiente formato exacto, una línea por ítem y en este orden: '
+            . 'Nota: … Calorías: … kcal Proteínas: … g Carbohidratos: … g Grasas: … g '
+            . 'Consejo actual: … Consejo próxima comida (' . trim($nextMealName) . '): …. '
+            . 'El consejo actual ' . $basis . '; el de la próxima comida debe ser específico para '
+            . trim($nextMealName) . '. No uses doble salto de linea';
     }
 
     /**
@@ -148,22 +164,6 @@ final class OpenAiClient
         }
 
         return $this->extractOutputText($data);
-    }
-
-    /**
-     * @return array{0:string,1:string} [comida actual, próxima comida] según hora en Buenos Aires.
-     */
-    private function currentMealSlot(): array
-    {
-        $tz = new \DateTimeZone('America/Argentina/Buenos_Aires');
-        $hour = (int)(new \DateTime('now', $tz))->format('H');
-
-        return match (true) {
-            $hour >= 8 && $hour < 12  => ['DESAYUNO', 'EL ALMUERZO DE HOY'],
-            $hour >= 12 && $hour < 15 => ['ALMUERZO', 'LA MERIENDA DE HOY'],
-            $hour >= 15 && $hour < 19 => ['MERIENDA', 'LA CENA DE HOY'],
-            default                   => ['CENA', 'EL DESAYUNO DE MANANA'],
-        };
     }
 
     private function trimToLastJsonBrace(string $raw): string
