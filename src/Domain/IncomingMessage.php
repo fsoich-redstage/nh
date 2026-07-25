@@ -6,7 +6,7 @@ namespace NutriHelper\Domain;
 final class IncomingMessage
 {
     public function __construct(
-        public readonly string $type, // 'text' | 'image' | 'other'
+        public readonly string $type, // 'text' | 'image' | 'poll_vote' | 'other'
         public readonly string $chatId,
         public readonly string $body,
         public readonly string $downloadUrl = '',

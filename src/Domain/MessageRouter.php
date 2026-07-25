@@ -10,8 +10,8 @@ use NutriHelper\Repository\PersonaRepository;
 
 /**
  * Decides what to do with an incoming message: onboard a new number, run the
- * meal-photo analysis, toggle the water reminder, answer "ayuda", or fall
- * back to the default instructions message.
+ * meal-photo analysis, trigger/resolve the water-reminder frequency poll,
+ * answer "ayuda", or fall back to the default instructions message.
  */
 final class MessageRouter
 {
@@ -52,6 +52,11 @@ final class MessageRouter
             return;
         }
 
+        if ($message->type === 'poll_vote') {
+            $this->handlePollVote($message);
+            return;
+        }
+
         // Other message types (e.g. status updates) are ignored.
     }
 
@@ -75,8 +80,8 @@ final class MessageRouter
     {
         $body = mb_strtolower(trim($message->body), 'UTF-8');
 
-        if ($body === 'agua' || $body === 'push agua -r xrr') {
-            $this->handleWaterToggle($message->chatId);
+        if ($body === 'agua') {
+            $this->handleWaterPollTrigger($message->chatId);
             return;
         }
 
@@ -94,24 +99,46 @@ final class MessageRouter
             '¡Hola! Soy Nutri Helper.',
             'Enviame una foto todos los dias de tus 4 comidas y te devuelvo los datos clave.',
             'También podés escribir "ayuda" para ver tips sobre cómo sacarle provecho.',
-            'Escribí "agua" para activar o desactivar tu recordatorio de agua.',
+            'Escribí "agua" para elegir cuántas veces por día querés tu recordatorio de agua.',
         ]));
     }
 
-    private function handleWaterToggle(string $chatId): void
+    private function handleWaterPollTrigger(string $chatId): void
     {
-        $newValue = $this->personas->toggleSetting($chatId);
+        $options = array_map(
+            static fn (int $n) => (string)$n,
+            range(WaterReminderScheduler::MIN_FREQUENCY, WaterReminderScheduler::MAX_FREQUENCY)
+        );
 
-        if ($newValue === null) {
-            $this->greenApi->sendMessage(
-                $chatId,
-                '❌ No pude actualizar tu preferencia de agua. Probá de nuevo más tarde.'
-            );
+        $this->greenApi->sendPoll(
+            $chatId,
+            '💧 ¿Cuántas veces por día querés que te recuerde tomar agua? (entre las 8 y las 20 hs)',
+            $options,
+            false
+        );
+    }
+
+    private function handlePollVote(IncomingMessage $message): void
+    {
+        if ($message->body === '') {
+            // Empty vote (e.g. retracted selection) — nothing to persist.
             return;
         }
 
-        $state = $newValue === 1 ? 'ACTIVADO' : 'DESACTIVADO';
-        $this->greenApi->sendMessage($chatId, "💧 Recordatorio de agua: {$state}.");
+        $frequency = (int)trim($message->body);
+        if (!WaterReminderScheduler::isValidFrequency($frequency)) {
+            return;
+        }
+
+        $stored = $this->personas->setWaterFrequency($message->chatId, $frequency);
+        if ($stored === null) {
+            return;
+        }
+
+        $this->greenApi->sendMessage(
+            $message->chatId,
+            "💧 Listo, te voy a recordar tomar agua {$stored} veces por día entre las 8 y las 20 hs."
+        );
     }
 
     private function handleImage(IncomingMessage $message): void

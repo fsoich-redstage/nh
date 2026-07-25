@@ -26,7 +26,35 @@ final class WebhookPayloadNormalizer
         }
 
         $typeMessage = (string)($messageData['typeMessage'] ?? $messageData['type'] ?? '');
-        $idMessage = (string)($messageData['idMessage'] ?? $messageData['id'] ?? $messageData['messageId'] ?? '');
+
+        // The top-level idMessage identifies this specific webhook notification
+        // (a poll vote update gets a fresh one each time, unlike pollMessageData's
+        // stanzaId which stays fixed for the poll's whole lifetime), so prefer it
+        // for dedupe purposes across all message types.
+        $idMessage = (string)(
+            $root['idMessage']
+            ?? $payload['idMessage']
+            ?? $messageData['idMessage']
+            ?? $messageData['id']
+            ?? $messageData['messageId']
+            ?? ''
+        );
+
+        if ($typeMessage === 'pollUpdateMessage') {
+            $votes = $messageData['pollMessageData']['votes'] ?? [];
+            $selected = '';
+            if (is_array($votes)) {
+                foreach ($votes as $vote) {
+                    $voters = $vote['optionVoters'] ?? [];
+                    if (is_array($voters) && in_array($chatId, $voters, true)) {
+                        $selected = (string)($vote['optionName'] ?? '');
+                        break;
+                    }
+                }
+            }
+
+            return new IncomingMessage('poll_vote', $chatId, $selected, '', $idMessage);
+        }
 
         if ($typeMessage === 'imageMessage' || $typeMessage === 'image') {
             $downloadUrl = (string)(

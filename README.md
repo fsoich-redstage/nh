@@ -8,7 +8,8 @@ de Composer.
 ## Estructura
 
 ```
-bin/send_water_reminder.php   # script de cron: recordatorio de agua a personas con setting=1
+bin/send_water_reminder.php   # script de cron (correr cada hora): envía el recordatorio de agua
+                               # a quienes tengan water_frequency seteado, solo en su hora programada
 public/webhook.php            # webhook de Green API (onboarding, comandos de texto, análisis de imagen)
 public/landing.php            # historial público por identifier (?identifier=XXXX)
 src/Config.php                # loader de .env, sin fallback hardcodeado
@@ -36,9 +37,33 @@ logs/                         # logs de la app (gitignored)
 3. Apuntar el servidor web a `public/` como document root, o exponer
    `public/webhook.php` y `public/landing.php` detrás de tu proxy actual.
 4. Configurar el webhook de Green API para que apunte a
-   `https://tu-dominio/webhook.php` (notificaciones de mensajes entrantes).
-5. Programar `bin/send_water_reminder.php` en cron (ej. cada hora) con
-   `php /ruta/a/nutri-helper/bin/send_water_reminder.php`.
+   `https://tu-dominio/webhook.php` (notificaciones de mensajes entrantes,
+   incluye `incomingMessageReceived` para texto/imagen/voto de encuesta).
+5. Programar `bin/send_water_reminder.php` en cron **cada hora en punto**:
+   `0 * * * * php /ruta/a/nutri-helper/bin/send_water_reminder.php`.
+   El script decide internamente si corresponde enviar algo en esa hora.
+
+## Recordatorio de agua (encuesta de frecuencia)
+
+Cuando el usuario escribe "agua", el bot le manda una encuesta de WhatsApp
+(`sendPoll`) con opciones del 3 al 12 ("¿cuántas veces por día?"). Al votar,
+Green API notifica el webhook con `typeMessage: "pollUpdateMessage"`; se lee
+la opción elegida desde `messageData.pollMessageData.votes[].optionName`
+(matcheando `optionVoters` contra el chatId) y se guarda en
+`persona.water_frequency`.
+
+`bin/send_water_reminder.php` está pensado para correr **una vez por hora**.
+En cada corrida:
+1. Si la hora actual (huso horario `America/Argentina/Buenos_Aires`) está
+   fuera de la ventana 8-20hs, no hace nada.
+2. Para cada persona con `water_frequency` seteado (3-12), calcula —de forma
+   determinística, sin guardar un horario— en qué horas del día le
+   corresponde un recordatorio (`WaterReminderScheduler`, que reparte N
+   avisos lo más parejo posible dentro de la ventana de 12hs) y solo le
+   envía el mensaje si la hora actual es una de esas.
+
+Por ejemplo, frecuencia 3 → recordatorios a las 8, 12 y 16hs; frecuencia 6 →
+8, 10, 12, 14, 16 y 18hs; frecuencia 12 → una vez por hora, de 8 a 19hs.
 
 ## Esquema SQL
 
@@ -54,7 +79,7 @@ CREATE TABLE persona (
     tipo       VARCHAR(32)  NOT NULL DEFAULT 'default',
     campo1     TINYINT(1)   NOT NULL DEFAULT 0,
     campo2     TINYINT(1)   NOT NULL DEFAULT 0,
-    setting    TINYINT(1)   NOT NULL DEFAULT 1,
+    water_frequency SMALLINT UNSIGNED NULL DEFAULT NULL, -- NULL/0 = recordatorio de agua apagado; 3-12 = veces por día
     PRIMARY KEY (number),
     UNIQUE KEY uniq_identifier (identifier)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -77,6 +102,14 @@ CREATE TABLE nutri (
     PRIMARY KEY (id),
     KEY idx_identifier_datetime (identifier, datetime)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+Si ya tenías una tabla `persona` con la columna booleana `setting` (versión
+anterior), migrala así:
+
+```sql
+ALTER TABLE persona CHANGE setting water_frequency SMALLINT UNSIGNED NULL DEFAULT NULL;
+UPDATE persona SET water_frequency = NULL WHERE water_frequency = 0;
 ```
 
 ## Seguridad — pendiente antes de producción

@@ -5,10 +5,20 @@ require __DIR__ . '/../src/autoload.php';
 
 use NutriHelper\Config;
 use NutriHelper\Db\Database;
+use NutriHelper\Domain\WaterReminderScheduler;
 use NutriHelper\Http\GreenApiClient;
 use NutriHelper\Repository\PersonaRepository;
 
 Config::load(__DIR__ . '/../.env');
+
+// Meant to run once per hour via cron; only actually sends anything during
+// each person's scheduled hour(s) inside the 8-20hs window.
+$currentHour = (int)(new DateTime('now', new DateTimeZone('America/Argentina/Buenos_Aires')))->format('G');
+
+if ($currentHour < WaterReminderScheduler::WINDOW_START_HOUR || $currentHour > WaterReminderScheduler::WINDOW_END_HOUR) {
+    echo json_encode(['ok' => true, 'sent' => 0, 'reason' => 'fuera del horario 8-20hs'], JSON_UNESCAPED_UNICODE), PHP_EOL;
+    exit;
+}
 
 const FRASES = [
     '¡Toma agua y seguí brillando!', 'Un vaso de agua y a seguir.', 'La hidratación es poder.',
@@ -90,14 +100,10 @@ if ($emoji === '') {
 $greenApi = new GreenApiClient(Config::greenApi());
 $personas = new PersonaRepository(Database::connect(Config::database()));
 
-$recipients = $personas->findWaterReminderRecipients();
-
-if ($recipients === []) {
-    $defaultChatId = Config::getOptional('GREEN_API_DEFAULT_CHAT_ID');
-    if ($defaultChatId !== '') {
-        $recipients = [['number' => $defaultChatId, 'shortname' => '']];
-    }
-}
+$recipients = array_filter(
+    $personas->findWaterReminderRecipients(),
+    static fn (array $r) => WaterReminderScheduler::isScheduledHour((int)$r['water_frequency'], $currentHour)
+);
 
 $results = [];
 foreach ($recipients as $recipient) {

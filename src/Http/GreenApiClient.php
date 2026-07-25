@@ -46,6 +46,22 @@ final class GreenApiClient
     }
 
     /**
+     * Sends a poll. Green API allows 2-12 options, message up to 255 chars,
+     * each option up to 100 chars, all unique.
+     *
+     * @param string[] $optionNames
+     */
+    public function sendPoll(string $chatId, string $message, array $optionNames, bool $multipleAnswers = false): array
+    {
+        return $this->request('sendPoll', [
+            'chatId'          => $chatId,
+            'message'         => $message,
+            'options'         => array_map(static fn (string $name) => ['optionName' => $name], $optionNames),
+            'multipleAnswers' => $multipleAnswers,
+        ]);
+    }
+
+    /**
      * Resolves the downloadable file URL for a media message when the webhook
      * payload itself did not include one.
      */

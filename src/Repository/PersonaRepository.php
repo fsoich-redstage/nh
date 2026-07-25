@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace NutriHelper\Repository;
 
+use NutriHelper\Domain\WaterReminderScheduler;
 use NutriHelper\Http\GreenApiClient;
 
 final class PersonaRepository
@@ -47,25 +48,41 @@ final class PersonaRepository
     }
 
     /**
-     * Toggles persona.setting (0<->1, NULL treated as 0) and returns the new value.
+     * Sets how many times per day (3-12) the water reminder should fire for
+     * this chat, or clears it (NULL = disabled) when $frequency is 0.
+     * Returns the stored value, or null on invalid input.
      */
-    public function toggleSetting(string $chatId): ?int
+    public function setWaterFrequency(string $chatId, int $frequency): ?int
     {
         $number = self::normalizePhone($chatId);
         if ($number === '') {
             return null;
         }
 
-        $update = $this->conn->prepare(
-            'UPDATE persona SET setting = CASE WHEN COALESCE(setting, 0) = 1 THEN 0 ELSE 1 END WHERE `number` = ?'
-        );
-        $update->execute([$number]);
+        if ($frequency !== 0 && !WaterReminderScheduler::isValidFrequency($frequency)) {
+            return null;
+        }
 
-        $select = $this->conn->prepare('SELECT COALESCE(setting, 0) FROM persona WHERE `number` = ? LIMIT 1');
-        $select->execute([$number]);
-        $value = $select->fetchColumn();
+        $value = $frequency === 0 ? null : $frequency;
 
-        return $value !== false ? (int)$value : null;
+        $update = $this->conn->prepare('UPDATE persona SET water_frequency = ? WHERE `number` = ?');
+        $update->execute([$value, $number]);
+
+        return $value;
+    }
+
+    public function getWaterFrequency(string $chatId): ?int
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return null;
+        }
+
+        $stmt = $this->conn->prepare('SELECT water_frequency FROM persona WHERE `number` = ? LIMIT 1');
+        $stmt->execute([$number]);
+        $value = $stmt->fetchColumn();
+
+        return ($value !== false && $value !== null) ? (int)$value : null;
     }
 
     /**
@@ -90,7 +107,7 @@ final class PersonaRepository
         $identifier = $this->generateIdentifier();
 
         $insert = $this->conn->prepare(
-            'INSERT INTO persona (`number`, name, shortname, foto, identifier, setting) VALUES (?, ?, ?, ?, ?, 1)'
+            'INSERT INTO persona (`number`, name, shortname, foto, identifier) VALUES (?, ?, ?, ?, ?)'
         );
         $insert->execute([$number, $name, $shortName, $photo, $identifier]);
 
@@ -132,11 +149,15 @@ final class PersonaRepository
     }
 
     /**
-     * @return array<int,array{number:string,name:string,shortname:string,identifier:string}>
+     * @return array<int,array{number:string,name:string,shortname:string,identifier:string,water_frequency:int}>
      */
     public function findWaterReminderRecipients(): array
     {
-        $stmt = $this->conn->query('SELECT `number`, name, shortname, identifier FROM persona WHERE setting = 1');
+        $stmt = $this->conn->query(
+            'SELECT `number`, name, shortname, identifier, water_frequency
+             FROM persona
+             WHERE water_frequency IS NOT NULL AND water_frequency > 0'
+        );
 
         return $stmt->fetchAll();
     }
