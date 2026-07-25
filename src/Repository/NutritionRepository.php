@@ -30,6 +30,41 @@ final class NutritionRepository
     }
 
     /**
+     * @return array{0:string,1:string} [start, end) of "yesterday" (America/Argentina/Buenos_Aires
+     *                                   calendar day), expressed as UTC datetime strings.
+     */
+    private function yesterdayUtcBounds(): array
+    {
+        $tzLocal = new \DateTimeZone('America/Argentina/Buenos_Aires');
+        $tzUtc = new \DateTimeZone('UTC');
+
+        $startLocal = new \DateTime('yesterday', $tzLocal);
+        $endLocal = (clone $startLocal)->modify('+1 day');
+
+        return [
+            (clone $startLocal)->setTimezone($tzUtc)->format('Y-m-d H:i:s'),
+            (clone $endLocal)->setTimezone($tzUtc)->format('Y-m-d H:i:s'),
+        ];
+    }
+
+    /**
+     * Whether this identifier logged at least one meal yesterday — the
+     * missed-meal reminder only runs for people who are actively using the
+     * bot day-to-day, not for anyone who's gone quiet.
+     */
+    public function hadEntriesYesterday(string $identifier): bool
+    {
+        [$startUtc, $endUtc] = $this->yesterdayUtcBounds();
+
+        $stmt = $this->conn->prepare(
+            'SELECT 1 FROM nutri WHERE identifier = ? AND datetime >= ? AND datetime < ? LIMIT 1'
+        );
+        $stmt->execute([$identifier, $startUtc, $endUtc]);
+
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
      * Counts today's entries (America/Argentina/Buenos_Aires calendar day) for
      * a given identifier — used to enforce the 4-meals-per-day limit.
      */

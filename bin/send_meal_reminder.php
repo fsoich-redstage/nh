@@ -19,6 +19,9 @@ Config::load(__DIR__ . '/../.env');
  * window, and only right around when THAT PERSON usually logs it (their
  * historical average hour for that meal, or a sensible default if they don't
  * have history yet). At most one reminder per person per meal per day.
+ *
+ * Only runs for people who logged at least one meal YESTERDAY — someone who's
+ * gone quiet doesn't get chased with reminders.
  */
 $tzLocal = new DateTimeZone('America/Argentina/Buenos_Aires');
 $now = new DateTime('now', $tzLocal);
@@ -39,6 +42,11 @@ foreach ($personas->findActivePersonas() as $persona) {
     if ($number === '') {
         continue;
     }
+
+    if (!$nutrition->hadEntriesYesterday($identifier)) {
+        continue; // no registró nada ayer: no lo perseguimos con recordatorios
+    }
+
     $chatId = str_ends_with($number, '@c.us') ? $number : $number . '@c.us';
 
     foreach (MealWindows::all() as $mealType) {

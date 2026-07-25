@@ -63,7 +63,10 @@ logs/                         # logs de la app (gitignored)
 ## Recordatorio de comida olvidada
 
 Cada hora, `bin/send_meal_reminder.php` recorre las 4 comidas (desayuno,
-almuerzo, merienda, cena) de cada persona activa. Para cada una:
+almuerzo, merienda, cena) de cada persona activa **que haya registrado al
+menos una comida AYER** (`NutritionRepository::hadEntriesYesterday`) — si no
+usó el bot el día anterior, no se lo persigue con recordatorios. Para cada
+comida de las personas que sí pasan ese filtro:
 
 1. Si la hora actual está fuera de la ventana propia de esa comida
    (desayuno 8-12hs, almuerzo 12-15hs, merienda 15-19hs, cena 19-24hs), no
