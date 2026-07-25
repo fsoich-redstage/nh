@@ -48,6 +48,25 @@ final class PersonaRepository
     }
 
     /**
+     * Display name for the history page header: shortname takes priority
+     * over the full name, matching how the WhatsApp bot addresses people.
+     */
+    public function findDisplayNameByIdentifier(string $identifier): string
+    {
+        $stmt = $this->conn->prepare('SELECT shortname, name FROM persona WHERE identifier = ? LIMIT 1');
+        $stmt->execute([$identifier]);
+        $row = $stmt->fetch();
+
+        if ($row === false) {
+            return '';
+        }
+
+        $shortname = trim((string)($row['shortname'] ?? ''));
+
+        return $shortname !== '' ? $shortname : trim((string)($row['name'] ?? ''));
+    }
+
+    /**
      * Sets how many times per day (3-12) the water reminder should fire for
      * this chat, or clears it (NULL = disabled) when $frequency is 0.
      * Returns the stored value, or null on invalid input.

@@ -56,7 +56,7 @@ try {
         new PersonaRepository($conn),
         new NutritionRepository($conn),
         new NutritionAnalysisParser(),
-        new ImageStore(Config::getOptional('NUTRI_IMAGE_DIR', __DIR__ . '/../storage/images')),
+        new ImageStore(Config::getOptional('NUTRI_IMAGE_DIR', __DIR__ . '/photos')),
         Config::get('NUTRI_LANDING_BASE_URL')
     );
 

@@ -11,16 +11,16 @@ de Composer.
 bin/send_water_reminder.php   # script de cron (correr cada hora): envía el recordatorio de agua
                                # a quienes tengan water_frequency seteado, solo en su hora programada
 public/webhook.php            # webhook de Green API (onboarding, comandos de texto, análisis de imagen)
-public/landing.php            # historial público por identifier (?identifier=XXXX)
+public/index.php              # front door del sitio (?identifier=XXXX): historial real o landing promocional
+public/photos/                # fotos servidas públicamente (mismo esquema que producción), gitignored
 src/Config.php                # loader de .env, sin fallback hardcodeado
 src/autoload.php              # autoload PSR-4 manual (namespace NutriHelper\)
-src/Http/GreenApiClient.php   # sendMessage / GetContactInfo / downloadFile
+src/Http/GreenApiClient.php   # sendMessage / GetContactInfo / downloadFile / sendPoll
 src/Http/OpenAiClient.php     # análisis nutricional vía Responses API
 src/Db/Database.php           # conexión PDO
 src/Repository/               # PersonaRepository, NutritionRepository
-src/Domain/                   # normalización de payload, ruteo de mensajes, parser de análisis, storage de imágenes, dedupe
-src/View/LandingRenderer.php  # HTML del historial
-storage/images/               # fotos guardadas (gitignored)
+src/Domain/                   # normalización de payload, ruteo de mensajes, parser de análisis, storage de imágenes, dedupe, scheduler de agua
+src/View/LandingRenderer.php  # historial (cards/filtros/JS) + landing promocional — porteado 1:1 del index.php real
 storage/locks/                # dedupe de eventos de webhook (gitignored)
 logs/                         # logs de la app (gitignored)
 ```
@@ -31,17 +31,39 @@ logs/                         # logs de la app (gitignored)
    - `GREEN_API_URL`, `GREEN_API_INSTANCE_ID`, `GREEN_API_TOKEN`
    - `OPENAI_API_KEY`
    - `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
-   - `NUTRI_IMAGE_DIR` (ruta absoluta con permisos de escritura)
-   - `NUTRI_LANDING_BASE_URL` (dominio público donde vive `public/landing.php`)
+   - `NUTRI_IMAGE_DIR` → ruta absoluta a `public/photos` (debe ser servida
+     públicamente por el webserver, igual que en producción: las fotos se ven
+     por URL directa)
+   - `NUTRI_IMAGE_PUBLIC_PATH` (default `/photos`)
+   - `NUTRI_LANDING_BASE_URL` (dominio público donde vive `public/index.php`)
+   - `NUTRI_BOT_WHATSAPP_LINK` (link `https://wa.me/...` mostrado en la
+     landing promocional)
 2. Crear las tablas (ver esquema abajo).
-3. Apuntar el servidor web a `public/` como document root, o exponer
-   `public/webhook.php` y `public/landing.php` detrás de tu proxy actual.
+3. Apuntar el servidor web (nginx/Apache) a `public/` como document root,
+   con `index.php` como índice por defecto — `public/index.php` es el punto
+   de entrada del sitio (`/` y `/?identifier=XXXX`).
 4. Configurar el webhook de Green API para que apunte a
    `https://tu-dominio/webhook.php` (notificaciones de mensajes entrantes,
    incluye `incomingMessageReceived` para texto/imagen/voto de encuesta).
 5. Programar `bin/send_water_reminder.php` en cron **cada hora en punto**:
    `0 * * * * php /ruta/a/nutri-helper/bin/send_water_reminder.php`.
    El script decide internamente si corresponde enviar algo en esa hora.
+
+## Historial público (`public/index.php`)
+
+Porteado 1:1 del `index.php` real de producción (mismo HTML/CSS/JS: filtros
+por comida, "últimas 2 semanas", orden asc/desc, separadores de día,
+scroll-snap, contador de registros), pero ahora usando los repositorios PDO
+del proyecto en vez de mysqli suelto.
+
+Con `?identifier=XXXX`:
+- Si el identifier no existe, o existe pero no tiene comidas registradas
+  todavía → landing promocional con botón "Ir al bot" (`NUTRI_BOT_WHATSAPP_LINK`).
+- Si tiene comidas → historial completo con cards, una por comida, con foto,
+  descripción y macros.
+
+Sin `identifier` → landing promocional directamente (mismo comportamiento
+que el sitio real).
 
 ## Recordatorio de agua (encuesta de frecuencia)
 

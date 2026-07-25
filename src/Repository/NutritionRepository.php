@@ -100,6 +100,10 @@ final class NutritionRepository
     }
 
     /**
+     * Chronological (oldest first) — matches the public history page, which
+     * relies on ascending order to build its day separators; the page's own
+     * JS re-sorts for display (defaults to newest-first).
+     *
      * @return array<int,array<string,mixed>>
      */
     public function fetchEntriesForIdentifier(string $identifier): array
@@ -116,7 +120,7 @@ final class NutritionRepository
         }
 
         $sql = sprintf(
-            'SELECT %s FROM nutri WHERE identifier = ? ORDER BY datetime DESC',
+            'SELECT %s FROM nutri WHERE identifier = ? ORDER BY datetime ASC',
             implode(', ', $fields)
         );
 
