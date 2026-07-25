@@ -1,0 +1,9 @@
+.env
+/storage/*
+!/storage/images/
+!/storage/images/.gitkeep
+!/storage/locks/
+!/storage/locks/.gitkeep
+/logs/*
+!/logs/.gitkeep
+*.log
