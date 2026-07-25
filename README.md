@@ -10,6 +10,8 @@ de Composer.
 ```
 bin/send_water_reminder.php   # script de cron (correr cada hora): envía el recordatorio de agua
                                # a quienes tengan water_frequency seteado, solo en su hora programada
+bin/send_daily_summary.php    # script de cron (correr cada hora): a la hora configurada, manda el
+                               # resumen diario (una sola llamada a OpenAI por persona) y consejo para mañana
 public/webhook.php            # webhook de Green API (onboarding, comandos de texto, análisis de imagen)
 public/index.php              # front door del sitio (?identifier=XXXX): historial real o landing promocional
 public/photos/                # fotos servidas públicamente (mismo esquema que producción), gitignored
@@ -48,6 +50,27 @@ logs/                         # logs de la app (gitignored)
 5. Programar `bin/send_water_reminder.php` en cron **cada hora en punto**:
    `0 * * * * php /ruta/a/nutri-helper/bin/send_water_reminder.php`.
    El script decide internamente si corresponde enviar algo en esa hora.
+6. Programar `bin/send_daily_summary.php` también cada hora (mismo patrón):
+   `0 * * * * php /ruta/a/nutri-helper/bin/send_daily_summary.php`.
+   Solo manda algo cuando la hora local coincide con `NUTRI_DAILY_SUMMARY_HOUR`
+   (default 22hs), y como máximo una vez por día aunque el cron se dispare
+   varias veces esa hora.
+
+## Resumen de fin de día
+
+A la hora configurada (`NUTRI_DAILY_SUMMARY_HOUR`), para cada persona que
+registró al menos una comida hoy:
+1. Se traen las comidas de hoy (`nutri_today` por identifier), incluyendo el
+   `consejo_actual` que se le dio en el momento de cada una (por eso ahora se
+   guarda ese consejo en la tabla `nutri`, antes solo se enviaba por WhatsApp
+   y se perdía).
+2. Se calculan los totales del día en PHP (no se le pide a OpenAI que sume).
+3. **Una única llamada a OpenAI** (`OpenAiClient::analyzeDaySummary`, mismo
+   estilo de prompt que el de "consejo próxima comida" por foto, pero a nivel
+   día completo) devuelve un resumen del día y un consejo concreto para
+   mañana — no comida por comida, sino la jornada en conjunto.
+4. Se arma un solo mensaje de WhatsApp: resumen + totales (calculados por
+   nosotros, no por el modelo) + consejo para mañana.
 
 ## Historial público (`public/index.php`)
 
@@ -148,6 +171,7 @@ CREATE TABLE nutri (
     grasas_label         VARCHAR(64) NOT NULL DEFAULT '',
     carbohidratos_label  VARCHAR(64) NOT NULL DEFAULT '',
     source               VARCHAR(32) NOT NULL DEFAULT '',
+    consejo_actual       TEXT NULL,                        -- consejo dado en el momento de esa comida; insumo del resumen diario
     PRIMARY KEY (id),
     KEY idx_identifier_datetime (identifier, datetime)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -166,6 +190,8 @@ ALTER TABLE persona
     ADD COLUMN onboarding_step VARCHAR(24) NOT NULL DEFAULT 'done';
 -- El default 'done' es a propósito: las personas que ya existían no deben
 -- quedar interrumpidas pidiéndoles edad/peso retroactivamente.
+
+ALTER TABLE nutri ADD COLUMN consejo_actual TEXT NULL;
 ```
 
 ## Seguridad — pendiente antes de producción

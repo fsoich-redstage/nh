@@ -29,18 +29,87 @@ final class OpenAiClient
             . 'El consejo actual debe basarse en la foto; el de la próxima comida debe ser específico para '
             . trim($nextMealName) . '. No uses doble salto de linea';
 
+        return $this->callResponsesApi([
+            ['type' => 'input_text', 'text' => $text],
+            [
+                'type' => 'input_image',
+                'image_url' => 'data:image/jpeg;base64,' . $imageBase64,
+                'detail' => 'high',
+            ],
+        ]);
+    }
+
+    /**
+     * Analyzes the whole day's meals (text-only, one call) and returns the
+     * raw two-line response: a narrative summary of the day, then a concrete
+     * piece of advice for tomorrow. Mirrors the "consejo próxima comida"
+     * prompt used per-meal, but scoped to the next day instead of the next meal.
+     *
+     * @param array<int,array{comida:string,hora:string,descripcion:string,calorias:int,proteinas:int,carbohidratos:int,grasas:int,consejo:string}> $meals
+     * @param array{calorias:int,proteinas:int,carbohidratos:int,grasas:int} $totals Already-computed day totals (the model is told not to recompute them).
+     * @return array{resumen:string,consejo:string}
+     */
+    public function analyzeDaySummary(array $meals, array $totals): array
+    {
+        $mealLines = [];
+        foreach ($meals as $meal) {
+            $line = '- ' . $meal['comida'] . ' (' . $meal['hora'] . '): ' . $meal['descripcion']
+                . '. Calorías: ' . $meal['calorias'] . ' kcal, Proteínas: ' . $meal['proteinas']
+                . ' g, Carbohidratos: ' . $meal['carbohidratos'] . ' g, Grasas: ' . $meal['grasas'] . ' g.';
+            if (trim($meal['consejo']) !== '') {
+                $line .= ' Consejo que se le dio en el momento: ' . trim($meal['consejo']) . '.';
+            }
+            $mealLines[] = $line;
+        }
+
+        $text = 'Sos un nutricionista breve y práctico que le escribe por WhatsApp a alguien que registra '
+            . 'todas sus comidas. Este es el detalle de lo que comió HOY:' . "\n" . implode("\n", $mealLines) . "\n\n"
+            . 'Totales del día ya calculados (no los recalcules, no los repitas en tu respuesta): '
+            . 'Calorías: ' . $totals['calorias'] . ' kcal, Proteínas: ' . $totals['proteinas']
+            . ' g, Carbohidratos: ' . $totals['carbohidratos'] . ' g, Grasas: ' . $totals['grasas'] . ' g. '
+            . 'Con esto, escribí un resumen honesto y motivador de cómo comió hoy en su conjunto '
+            . '(no repitas comida por comida, hablá del día completo), y un consejo concreto y específico '
+            . 'para mejorar mañana. Respondé en el siguiente formato exacto, una línea por ítem: '
+            . 'Resumen: … Consejo para mañana: …. No uses doble salto de línea.';
+
+        $raw = $this->callResponsesApi([['type' => 'input_text', 'text' => $text]]);
+
+        return $this->extractSummaryAndAdvice($raw);
+    }
+
+    /**
+     * @return array{resumen:string,consejo:string}
+     */
+    private function extractSummaryAndAdvice(string $raw): array
+    {
+        $resumen = '';
+        $consejo = '';
+
+        if (preg_match('/Resumen:\s*(.+?)(?:\s*Consejo\s+para\s+ma[nñ]ana:|\r?\n|$)/isu', $raw, $m)) {
+            $resumen = trim($m[1]);
+        }
+        if (preg_match('/Consejo\s+para\s+ma[nñ]ana:\s*(.+?)(?:\r?\n|$)/isu', $raw, $m)) {
+            $consejo = trim($m[1]);
+        }
+
+        if ($resumen === '' && $consejo === '') {
+            // Unexpected format — fall back to the raw text so nothing is lost.
+            $resumen = trim($raw);
+        }
+
+        return ['resumen' => $resumen, 'consejo' => $consejo];
+    }
+
+    /**
+     * @param array<int,array<string,mixed>> $content
+     */
+    private function callResponsesApi(array $content): string
+    {
         $payload = [
             'model' => 'gpt-4o-mini',
             'input' => [[
                 'role' => 'user',
-                'content' => [
-                    ['type' => 'input_text', 'text' => $text],
-                    [
-                        'type' => 'input_image',
-                        'image_url' => 'data:image/jpeg;base64,' . $imageBase64,
-                        'detail' => 'high',
-                    ],
-                ],
+                'content' => $content,
             ]],
         ];
 

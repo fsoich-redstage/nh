@@ -292,6 +292,7 @@ final class MessageRouter
                 'grasas_label'        => (string)$fatLabel,
                 'carbohidratos_label' => (string)$carbLabel,
                 'source'              => 'nutri-helper',
+                'consejo_actual'      => $advices['actual'],
             ]);
 
             $reply = [];
