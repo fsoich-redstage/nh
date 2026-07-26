@@ -118,6 +118,63 @@ final class NutritionRepository
     }
 
     /**
+     * @param string $localDate 'Y-m-d', interpreted as a calendar day in
+     *                          America/Argentina/Buenos_Aires (used for
+     *                          backdated meal entries via the "cargar" flow).
+     * @return array{0:string,1:string} [start, end) of that local calendar
+     *                                   day, expressed as UTC datetime strings.
+     */
+    private function boundsForLocalDate(string $localDate): array
+    {
+        $tzLocal = new \DateTimeZone('America/Argentina/Buenos_Aires');
+        $tzUtc = new \DateTimeZone('UTC');
+
+        $startLocal = new \DateTime($localDate, $tzLocal);
+        $endLocal = (clone $startLocal)->modify('+1 day');
+
+        return [
+            (clone $startLocal)->setTimezone($tzUtc)->format('Y-m-d H:i:s'),
+            (clone $endLocal)->setTimezone($tzUtc)->format('Y-m-d H:i:s'),
+        ];
+    }
+
+    /**
+     * Counts entries for a given identifier on an arbitrary past local date —
+     * same 4-meals-per-day limit as countTodayForIdentifier(), applied to the
+     * date chosen in the "cargar" (backdated meal) flow instead of today.
+     */
+    public function countEntriesForIdentifierOnDate(string $identifier, string $localDate): int
+    {
+        [$startUtc, $endUtc] = $this->boundsForLocalDate($localDate);
+
+        $stmt = $this->conn->prepare(
+            'SELECT COUNT(*) FROM nutri WHERE identifier = ? AND datetime >= ? AND datetime < ?'
+        );
+        $stmt->execute([$identifier, $startUtc, $endUtc]);
+
+        return (int)$stmt->fetchColumn();
+    }
+
+    /**
+     * Whether a given meal type was already logged on an arbitrary past local
+     * date — the "cargar" flow's equivalent of hasMealTypeToday(), so it
+     * doesn't create a second DESAYUNO for a day that already has one.
+     */
+    public function hasMealTypeOnDate(string $identifier, string $mealType, string $localDate): bool
+    {
+        [$startUtc, $endUtc] = $this->boundsForLocalDate($localDate);
+
+        $stmt = $this->conn->prepare(
+            'SELECT 1 FROM nutri
+             WHERE identifier = ? AND comida = ? AND datetime >= ? AND datetime < ?
+             LIMIT 1'
+        );
+        $stmt->execute([$identifier, $mealType, $startUtc, $endUtc]);
+
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
      * Today's entries for an identifier, chronological — the raw material for
      * the end-of-day summary (includes the advice given at the time, if any).
      *
@@ -191,9 +248,12 @@ final class NutritionRepository
             return null;
         }
 
+        $tzLocal = new \DateTimeZone('America/Argentina/Buenos_Aires');
+        $tzUtc = new \DateTimeZone('UTC');
+
         $sum = 0.0;
         foreach ($rows as $datetime) {
-            $local = (new \DateTime((string)$datetime))->modify('-3 hours');
+            $local = (new \DateTime((string)$datetime, $tzUtc))->setTimezone($tzLocal);
             $sum += (float)$local->format('H') + ((float)$local->format('i') / 60);
         }
 
@@ -222,9 +282,12 @@ final class NutritionRepository
     }
 
     /**
-     * Inserts a nutrition record, skipping the insert (returns '') when the
-     * description is identical to the identifier's most recent entry — avoids
-     * duplicate rows from webhook retries.
+     * Inserts a nutrition record, skipping the insert (returns '') when an
+     * entry with the identical description was already stored for this
+     * identifier within the last few seconds — avoids duplicate rows from
+     * webhook retries (belt-and-suspenders on top of EventDeduplicator),
+     * without silently dropping two genuinely distinct meals that happen to
+     * share the same description later in the day.
      *
      * @param array{
      *     foto:string,
@@ -240,30 +303,39 @@ final class NutritionRepository
      *     carbohidratos_label:string,
      *     source?:string,
      *     consejo_actual?:string,
-     *     comida?:string
-     * } $record
+     *     comida?:string,
+     *     datetime?:string
+     * } $record 'datetime', when present and non-empty, must be a UTC
+     *            'Y-m-d H:i:s' string — used by the "cargar" backdated-meal
+     *            flow to log a meal on a past date/hour instead of NOW().
      */
     public function insert(array $record): string
     {
-        $lastDescription = $this->lastDescription($record['identifier']);
-        if ($lastDescription !== null && trim($lastDescription) === trim($record['descripcion'])) {
+        if ($this->hasRecentDuplicate($record['identifier'], $record['descripcion'])) {
             return '';
         }
 
         $hasSource = Database::tableHasColumn($this->conn, 'nutri', 'source');
         $hasConsejo = Database::tableHasColumn($this->conn, 'nutri', 'consejo_actual');
         $hasComida = Database::tableHasColumn($this->conn, 'nutri', 'comida');
+        $datetimeOverride = ($record['datetime'] ?? '') !== '' ? $record['datetime'] : null;
 
-        $columns = [
-            'foto', 'descripcion', 'datetime', 'identifier',
-            'calorias', 'proteinas', 'grasas', 'carbohidratos',
+        $columns = ['foto', 'descripcion', 'datetime'];
+        $values = [$record['foto'], $record['descripcion']];
+        if ($datetimeOverride !== null) {
+            $values[] = $datetimeOverride;
+        }
+
+        $columns = array_merge($columns, [
+            'identifier', 'calorias', 'proteinas', 'grasas', 'carbohidratos',
             'calorias_label', 'proteinas_label', 'grasas_label', 'carbohidratos_label',
-        ];
-        $values = [
-            $record['foto'], $record['descripcion'], $record['identifier'],
+        ]);
+        array_push(
+            $values,
+            $record['identifier'],
             $record['calorias'], $record['proteinas'], $record['grasas'], $record['carbohidratos'],
-            $record['calorias_label'], $record['proteinas_label'], $record['grasas_label'], $record['carbohidratos_label'],
-        ];
+            $record['calorias_label'], $record['proteinas_label'], $record['grasas_label'], $record['carbohidratos_label']
+        );
 
         if ($hasSource) {
             $columns[] = 'source';
@@ -280,9 +352,10 @@ final class NutritionRepository
             $values[] = $record['comida'] ?? '';
         }
 
-        // datetime uses NOW() rather than a bound placeholder.
+        // datetime uses NOW() rather than a bound placeholder, unless a
+        // specific one was requested (backdated entries).
         $placeholders = array_map(
-            static fn (string $col) => $col === 'datetime' ? 'NOW()' : '?',
+            static fn (string $col) => ($col === 'datetime' && $datetimeOverride === null) ? 'NOW()' : '?',
             $columns
         );
 
@@ -335,14 +408,65 @@ final class NutritionRepository
         return $stmt->fetchAll();
     }
 
-    private function lastDescription(string $identifier): ?string
+    /**
+     * True only when the identifier's most recent entry has the same
+     * description AND was inserted less than $windowSeconds ago — narrow
+     * enough to catch a webhook retry landing a second insert, but not two
+     * unrelated meals (e.g. lunch and dinner) that happen to read the same.
+     */
+    private function hasRecentDuplicate(string $identifier, string $descripcion, int $windowSeconds = 60): bool
     {
         $stmt = $this->conn->prepare(
-            'SELECT descripcion FROM nutri WHERE identifier = ? ORDER BY datetime DESC LIMIT 1'
+            'SELECT descripcion, datetime FROM nutri WHERE identifier = ? ORDER BY datetime DESC LIMIT 1'
         );
         $stmt->execute([$identifier]);
-        $value = $stmt->fetchColumn();
+        $row = $stmt->fetch();
 
-        return $value !== false ? (string)$value : null;
+        if ($row === false) {
+            return false;
+        }
+
+        if (trim((string)$row['descripcion']) !== trim($descripcion)) {
+            return false;
+        }
+
+        $lastDatetime = new \DateTime((string)$row['datetime'], new \DateTimeZone('UTC'));
+        $now = new \DateTime('now', new \DateTimeZone('UTC'));
+
+        return ($now->getTimestamp() - $lastDatetime->getTimestamp()) < $windowSeconds;
+    }
+
+    /**
+     * Deletes the most recent entry logged today for this identifier — backs
+     * the "borrar" text command so a mis-logged meal can be undone without DB
+     * access. Returns the deleted row (for the confirmation message) or null
+     * if there was nothing to delete today.
+     *
+     * @return array{id:int,descripcion:string,comida:?string}|null
+     */
+    public function deleteMostRecentEntryToday(string $identifier): ?array
+    {
+        [$startUtc, $endUtc] = $this->todayUtcBounds();
+
+        $stmt = $this->conn->prepare(
+            'SELECT id, descripcion, comida FROM nutri
+             WHERE identifier = ? AND datetime >= ? AND datetime < ?
+             ORDER BY datetime DESC LIMIT 1'
+        );
+        $stmt->execute([$identifier, $startUtc, $endUtc]);
+        $row = $stmt->fetch();
+
+        if ($row === false) {
+            return null;
+        }
+
+        $delete = $this->conn->prepare('DELETE FROM nutri WHERE id = ?');
+        $delete->execute([$row['id']]);
+
+        return [
+            'id'         => (int)$row['id'],
+            'descripcion' => (string)$row['descripcion'],
+            'comida'     => $row['comida'] !== null ? (string)$row['comida'] : null,
+        ];
     }
 }

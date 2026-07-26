@@ -11,57 +11,78 @@ de Composer.
 bin/send_water_reminder.php   # script de cron (correr cada hora): envía el recordatorio de agua
                                # a quienes tengan water_frequency seteado, solo en su hora programada
 bin/send_daily_summary.php    # script de cron (correr cada hora): a la hora configurada, manda el
-                               # resumen diario (una sola llamada a OpenAI por persona) y consejo para mañana
+                               # resumen diario (una sola llamada a OpenAI por persona), consejo para
+                               # mañana y un chart de macros del día
 bin/send_meal_reminder.php    # script de cron (correr cada hora): pregunta por poll si te olvidaste
                                # de una comida, según tu hora habitual de esa comida
 bin/send_monday_kickoff.php   # script de cron (correr lunes de 8 a 12): envión de arranque de
                                # semana para quien registró comidas la semana pasada
-public/webhook.php            # webhook de Green API (onboarding, comandos de texto, análisis de imagen)
+bin/check_instance_health.php # script de cron (cada 5-15 min): alerta si la instancia de Green API
+                               # se desconectó, ya que ahí todos los demás crons fallan en silencio
+bin/backfill_persona_contact_info.php # script manual, una sola vez: re-completa name/shortname/foto/
+                               # pushname desde Green API para personas que ya existían
+public/webhook.php            # webhook de Green API (onboarding, comandos de texto, análisis de imagen);
+                               # requiere ?token=<GREEN_API_WEBHOOK_TOKEN> en la URL configurada
 public/index.php              # front door del sitio (?identifier=XXXX): historial real o landing promocional
 public/photos/                # fotos servidas públicamente (mismo esquema que producción), gitignored
+public/admin/index.php        # panel admin: listado de todos los usuarios + stats (protegido, HTTP Basic Auth)
+public/admin/persona.php      # panel admin: detalle de un usuario (contacto completo + todas sus comidas/fotos)
 src/Config.php                # loader de .env, sin fallback hardcodeado
 src/autoload.php              # autoload PSR-4 manual (namespace NutriHelper\)
 src/Http/GreenApiClient.php   # sendMessage / GetContactInfo / downloadFile / sendPoll
 src/Http/OpenAiClient.php     # análisis nutricional vía Responses API
+src/Http/AdminAuth.php        # guard de HTTP Basic Auth para public/admin/
 src/Db/Database.php           # conexión PDO
 src/Repository/               # PersonaRepository, NutritionRepository
 src/Domain/                   # normalización de payload, ruteo de mensajes, parser de análisis, storage de imágenes, dedupe, scheduler de agua
+src/Domain/DayChartRenderer.php # chart PNG (GD, sin dependencias) de macros del día para el resumen diario
 src/View/LandingRenderer.php  # historial (cards/filtros/JS) + landing promocional — porteado 1:1 del index.php real
+src/View/AdminRenderer.php    # listado de usuarios + detalle con foto/macros/consejo para el panel admin
 storage/locks/                # dedupe de eventos de webhook (gitignored)
-logs/                         # logs de la app (gitignored)
+logs/                         # logs de la app (gitignored), rotan solos pasados ~5MB
 ```
 
 ## Setup
 
 1. `cp .env.example .env` y completar:
    - `GREEN_API_URL`, `GREEN_API_INSTANCE_ID`, `GREEN_API_TOKEN`
+   - `GREEN_API_WEBHOOK_TOKEN` → generar un secreto (ej. `openssl rand -hex 24`);
+     el webhook rechaza cualquier request sin este token
    - `OPENAI_API_KEY`
    - `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
    - `NUTRI_IMAGE_DIR` → ruta absoluta a `public/photos` (debe ser servida
      públicamente por el webserver, igual que en producción: las fotos se ven
-     por URL directa)
+     por URL directa; también se usa para los charts del resumen diario)
    - `NUTRI_IMAGE_PUBLIC_PATH` (default `/photos`)
    - `NUTRI_LANDING_BASE_URL` (dominio público donde vive `public/index.php`)
    - `NUTRI_BOT_WHATSAPP_LINK` (link `https://wa.me/...` mostrado en la
      landing promocional)
+   - `NUTRI_HEALTH_ALERT_WEBHOOK_URL` (opcional) → webhook de Slack/Discord/etc.
+     notificado si la instancia de Green API se desconecta
 2. Crear las tablas (ver esquema abajo).
 3. Apuntar el servidor web (nginx/Apache) a `public/` como document root,
    con `index.php` como índice por defecto — `public/index.php` es el punto
    de entrada del sitio (`/` y `/?identifier=XXXX`).
 4. Configurar el webhook de Green API para que apunte a
-   `https://tu-dominio/webhook.php` (notificaciones de mensajes entrantes,
-   incluye `incomingMessageReceived` para texto/imagen/voto de encuesta).
-5. Programar `bin/send_water_reminder.php` en cron **cada hora en punto**:
+   `https://tu-dominio/webhook.php?token=<GREEN_API_WEBHOOK_TOKEN>` (notificaciones
+   de mensajes entrantes, incluye `incomingMessageReceived` para texto/imagen/voto
+   de encuesta). **El `?token=` es obligatorio** — sin autenticación, cualquiera que
+   conozca la URL podría inyectar mensajes falsos a nombre de cualquier número.
+5. Programar `bin/check_instance_health.php` cada 5-15 minutos:
+   `*/10 * * * * php /ruta/a/nutri-helper/bin/check_instance_health.php`.
+   Alerta (log + webhook opcional) si la sesión de WhatsApp se desconectó, que es
+   silenciosa para todos los demás crons.
+6. Programar `bin/send_water_reminder.php` en cron **cada hora en punto**:
    `0 * * * * php /ruta/a/nutri-helper/bin/send_water_reminder.php`.
    El script decide internamente si corresponde enviar algo en esa hora.
-6. Programar `bin/send_daily_summary.php` también cada hora (mismo patrón):
+7. Programar `bin/send_daily_summary.php` también cada hora (mismo patrón):
    `0 * * * * php /ruta/a/nutri-helper/bin/send_daily_summary.php`.
    Solo manda algo cuando la hora local coincide con `NUTRI_DAILY_SUMMARY_HOUR`
    (default 22hs), y como máximo una vez por día aunque el cron se dispare
    varias veces esa hora.
-7. Programar `bin/send_meal_reminder.php` también cada hora:
+8. Programar `bin/send_meal_reminder.php` también cada hora:
    `0 * * * * php /ruta/a/nutri-helper/bin/send_meal_reminder.php`.
-8. Programar `bin/send_monday_kickoff.php` para correr **solo los lunes, de
+9. Programar `bin/send_monday_kickoff.php` para correr **solo los lunes, de
    8 a 12hs** (coincide con la ventana de desayuno, que es cuando se manda el
    mensaje): `0 8-12 * * 1 php /ruta/a/nutri-helper/bin/send_monday_kickoff.php`.
 
@@ -193,6 +214,122 @@ Igual que con el agua, cada encuesta se resuelve mirando
 se interpreta como edad o peso según corresponda; recién cuando el onboarding
 terminó, un voto de encuesta se interpreta como frecuencia de agua.
 
+## Menú interactivo y comandos de texto
+
+Cualquier mensaje de texto que no matchee un comando conocido (o directamente
+"menu") dispara un menú interactivo (`sendListMessage` de Green API: un botón
+que abre una lista de opciones tappeable) con "Ayuda", "Recordatorio de agua",
+"Cargar comida atrasada" y "Borrar última comida". Si Green API rechaza el
+`sendListMessage` (algunas combinaciones cliente/instancia no lo soportan), se
+cae automáticamente a un mensaje de texto plano con las mismas opciones.
+
+Comandos de texto soportados: `agua`, `ayuda`, `menu`, `borrar`, `cargar`.
+
+- **`borrar`**: elimina el registro de comida más reciente cargado **hoy**
+  para ese identifier (`NutritionRepository::deleteMostRecentEntryToday`) y
+  confirma qué se borró. No hay confirmación de "¿estás seguro?" — pensado
+  para corregir un error de carga inmediato, no como papelera de reciclaje.
+
+## Cargar una comida de un día anterior (`cargar`)
+
+Una foto o texto normal siempre se registra con la fecha/hora actual — para
+una comida que te olvidaste de cargar en el momento, `cargar` arranca un flujo
+de 3 pasos con `persona.pending_backdate_step`:
+
+1. **`awaiting_day`**: se manda un poll "¿De qué día es la comida que querés
+   cargar?" con 7 opciones (Hoy, Ayer, Hace 2 días … Hace 6 días — mismo
+   horizonte que el historial semanal). Al votar, se guarda la fecha elegida
+   en `persona.pending_backdate_date` y se pasa a `awaiting_meal`.
+2. **`awaiting_meal`**: se manda un poll "¿Qué comida fue?" (Desayuno /
+   Almuerzo / Merienda / Cena). Al votar, se guarda en
+   `persona.pending_backdate_meal` y se pasa a `awaiting_content`.
+3. **`awaiting_content`**: el próximo mensaje (foto o texto) se procesa igual
+   que una carga normal — mismo análisis de OpenAI, mismo límite de 4 comidas
+   por día (aplicado al día elegido, no a hoy) y el mismo chequeo de "esa
+   comida ya está registrada ese día" — pero se guarda con una fecha/hora
+   explícita en vez de `NOW()`: la fecha elegida, a la hora promedio histórica
+   de esa persona para esa comida (`NutritionRepository::findAverageMealHour`,
+   el mismo cálculo que usa `bin/send_meal_reminder.php`), o el default de
+   `MealWindows::defaultHour()` si todavía no tiene historial — como la hora
+   real en que comió no es un dato que se pregunta, "ahora" sería incorrecto
+   para un registro retroactivo.
+
+El flujo se puede interrumpir en cualquier punto simplemente ignorando el
+poll/mensaje pendiente — no hay timeout ni opción de "cancelar" explícita,
+pero iniciar `cargar` de nuevo (o cualquier otro comando) pisa el estado
+anterior sin dejar el bot trabado.
+
+## Datos de contacto en el onboarding (`persona.foto`, `pushname`)
+
+`GreenApiClient::getContactInfo()` ya traía `name`, `shortName`, `pushname` y
+`profilePicUrl` (el campo `avatar` de Green API), pero el onboarding tenía un
+bug: guardaba el `pushname` en la columna `foto`, y el `profilePicUrl` (la
+foto de perfil real) no se guardaba en ningún lado. Ahora:
+
+- `persona.foto` guarda `profilePicUrl` (la URL de la foto de perfil de
+  WhatsApp), como corresponde al nombre de la columna.
+- `persona.pushname` (columna nueva) guarda el `pushname` — el nombre que la
+  propia persona eligió mostrar, útil como fallback cuando `name`/`shortName`
+  vienen vacíos.
+- `PersonaRepository::getOrCreateIdentifier()` ahora recibe el array de
+  contacto completo (`$contact`) en vez de parámetros posicionales sueltos,
+  para no repetir este tipo de mezcla de campos a futuro.
+
+Para las personas que ya se registraron antes de este fix (`foto` con un
+pushname adentro en vez de una URL, y sin `pushname` guardado en ningún lado),
+correr una vez:
+
+```bash
+php bin/backfill_persona_contact_info.php
+```
+
+Re-consulta `GetContactInfo` para cada persona existente y completa
+`name`/`shortname`/`foto`/`pushname` con lo que Green API devuelva — solo
+pisa un campo cuando Green API trae un valor no vacío para él, así que nunca
+borra un dato bueno que ya tenías por una respuesta parcial. Es idempotente:
+correrlo de nuevo no rompe nada, solo vuelve a aplicar los mismos datos.
+`GetContactInfo` tiene rate limit por instancia, así que el script hace una
+pausa corta (300ms) entre personas.
+
+## Panel de administración (`public/admin/`)
+
+Panel de solo lectura para vos: listado de todos los usuarios con sus stats
+(`public/admin/index.php`) y, por cada uno, su info de contacto completa más
+**todas** las comidas que cargó, con las fotos (`public/admin/persona.php?identifier=XXXX`).
+
+**Setup:**
+
+1. Generar un hash de contraseña:
+   ```bash
+   php -r "echo password_hash('tu-password-elegida', PASSWORD_DEFAULT);"
+   ```
+2. Completar en `.env`:
+   ```
+   ADMIN_USERNAME=fede
+   ADMIN_PASSWORD_HASH=<el hash generado arriba>
+   ```
+3. Entrar a `https://tu-dominio/admin/` — el navegador va a pedir usuario/contraseña
+   (HTTP Basic Auth vía `src/Http/AdminAuth.php`). Sin `ADMIN_USERNAME`/
+   `ADMIN_PASSWORD_HASH` configurados, el panel devuelve 500 en vez de quedar
+   abierto sin auth.
+
+**Importante si el deploy es nginx + PHP-FPM** (no Apache/mod_php): PHP-FPM no
+recibe el header `Authorization` por defecto, así que `PHP_AUTH_USER`/
+`PHP_AUTH_PW` llegan vacíos y el panel rechaza *cualquier* credencial. Agregar
+al bloque `location` que sirve PHP:
+```nginx
+fastcgi_param HTTP_AUTHORIZATION $http_authorization;
+```
+
+**Qué expone:** número de teléfono real, nombre/shortname/pushname, foto de
+perfil, edad/peso/frecuencia de agua declarados, y el historial completo de
+comidas con sus fotos — de **todos** los usuarios a la vez. Es el único punto
+del proyecto con ese nivel de acceso, así que:
+- Nunca lo dejes servido por HTTP plano (solo HTTPS) — Basic Auth manda la
+  contraseña en cada request, prácticamente en texto plano sin TLS.
+- La contraseña vive solo como hash en `.env` (nunca en el repo); rotarla es
+  generar un hash nuevo y pisar `ADMIN_PASSWORD_HASH`.
+
 ## Esquema SQL
 
 Inferido del código original — ajustar tipos/tamaños si tu DB real difiere.
@@ -202,7 +339,8 @@ CREATE TABLE persona (
     number     BIGINT UNSIGNED NOT NULL,
     name       VARCHAR(191) NOT NULL DEFAULT '',
     shortname  VARCHAR(191) NOT NULL DEFAULT '',
-    foto       VARCHAR(191) NOT NULL DEFAULT '',
+    pushname   VARCHAR(191) NOT NULL DEFAULT '',   -- nombre elegido por la persona (Green API GetContactInfo)
+    foto       VARCHAR(191) NOT NULL DEFAULT '',   -- profilePicUrl (Green API GetContactInfo), NO el pushname
     identifier VARCHAR(16)  NOT NULL,
     tipo       VARCHAR(32)  NOT NULL DEFAULT 'default',
     campo1     TINYINT(1)   NOT NULL DEFAULT 0,
@@ -213,6 +351,9 @@ CREATE TABLE persona (
     onboarding_step VARCHAR(24) NOT NULL DEFAULT 'done',   -- 'awaiting_age' | 'awaiting_weight' | 'done'
     pending_meal_reminder VARCHAR(16) NULL DEFAULT NULL,   -- comida cuyo poll "¿te olvidaste?" está pendiente de respuesta
     pending_text_meal     VARCHAR(16) NULL DEFAULT NULL,   -- comida que va a describir por texto (eligió "comí pero me olvidé")
+    pending_backdate_step VARCHAR(24) NULL DEFAULT NULL,   -- 'awaiting_day' | 'awaiting_meal' | 'awaiting_content' (flujo "cargar")
+    pending_backdate_date DATE        NULL DEFAULT NULL,   -- día elegido en el flujo "cargar", mientras está en curso
+    pending_backdate_meal VARCHAR(16) NULL DEFAULT NULL,   -- comida elegida en el flujo "cargar", mientras está en curso
     PRIMARY KEY (number),
     UNIQUE KEY uniq_identifier (identifier)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -257,6 +398,16 @@ ALTER TABLE persona
     ADD COLUMN pending_meal_reminder VARCHAR(16) NULL DEFAULT NULL,
     ADD COLUMN pending_text_meal VARCHAR(16) NULL DEFAULT NULL;
 
+ALTER TABLE persona
+    ADD COLUMN pending_backdate_step VARCHAR(24) NULL DEFAULT NULL,
+    ADD COLUMN pending_backdate_date DATE NULL DEFAULT NULL,
+    ADD COLUMN pending_backdate_meal VARCHAR(16) NULL DEFAULT NULL;
+
+ALTER TABLE persona
+    ADD COLUMN pushname VARCHAR(191) NOT NULL DEFAULT '';
+-- Después de agregar esta columna, correr php bin/backfill_persona_contact_info.php
+-- una vez para completarla (y corregir `foto`) para las personas ya existentes.
+
 ALTER TABLE nutri
     ADD COLUMN consejo_actual TEXT NULL,
     ADD COLUMN comida VARCHAR(16) NULL DEFAULT NULL;
@@ -271,6 +422,28 @@ API key de OpenAI. **Esas credenciales quedaron expuestas y hay que rotarlas**
 proyecto listo para producción. Este repo nuevo no tiene ningún fallback
 hardcodeado — si falta una variable en `.env`, tira una excepción en vez de
 usar un valor por defecto, así que rotarlas después es solo cambiar `.env`.
+
+Ya resuelto en este repo:
+- **Autenticación del webhook**: `public/webhook.php` exige `?token=` matcheando
+  `GREEN_API_WEBHOOK_TOKEN` (comparación `hash_equals`, sin fallback). Antes
+  cualquiera que descubriera la URL podía inyectar mensajes/fotos/votos falsos
+  a nombre de cualquier `chatId`.
+- **Chats grupales ignorados**: un `chatId` `@g.us` se descarta explícitamente
+  antes de tocar `persona`/`nutri` (antes se procesaba como si fuera un número
+  1:1, corrompiendo el registro de esa "persona").
+- **Log del webhook acotado**: cada línea se trunca a ~4000 caracteres y el
+  archivo rota (se renombra a `.log.1`) al superar ~5MB, en vez de crecer sin
+  límite con datos de usuarios en texto plano.
+- **Input de usuario saneado antes de ir al prompt de OpenAI**: la
+  descripción/caption se recorta a 300 caracteres y se envuelve como dato
+  citado, no como instrucción, para reducir el riesgo de que alguien intente
+  hacer prompt injection contra su propio análisis nutricional.
+
+Aun pendiente:
+- Rate limiting en `public/webhook.php` (hoy nada impide un flood de requests
+  autenticadas con un token filtrado, más allá del dedupe por idMessage).
+- HTTPS/TLS termination y hardening del webserver quedan fuera de este repo
+  (responsabilidad del deploy).
 
 ## Fuera de alcance de este refactor
 

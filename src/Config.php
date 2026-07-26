@@ -73,6 +73,17 @@ final class Config
     }
 
     /**
+     * Shared-secret token required as ?token= on the webhook URL configured
+     * in Green API — set once in .env and reused when pointing the instance's
+     * webhookUrl at https://tu-dominio/webhook.php?token=... . Empty string
+     * means "not configured" (public/webhook.php refuses to run without it).
+     */
+    public static function webhookToken(): string
+    {
+        return self::getOptional('GREEN_API_WEBHOOK_TOKEN', '');
+    }
+
+    /**
      * @return array{apiUrl:string,idInstance:string,apiToken:string}
      */
     public static function greenApi(): array

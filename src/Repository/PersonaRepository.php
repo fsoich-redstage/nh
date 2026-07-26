@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace NutriHelper\Repository;
 
+use NutriHelper\Db\Database;
 use NutriHelper\Domain\WaterReminderScheduler;
 use NutriHelper\Http\GreenApiClient;
 
@@ -11,6 +12,14 @@ final class PersonaRepository
     public const ONBOARDING_AWAITING_AGE = 'awaiting_age';
     public const ONBOARDING_AWAITING_WEIGHT = 'awaiting_weight';
     public const ONBOARDING_DONE = 'done';
+
+    // Steps of the "cargar" backdated-meal flow (persona.pending_backdate_step):
+    // awaiting_day -> user picked "cargar", waiting for the day-offset poll vote
+    // awaiting_meal -> day chosen, waiting for the meal-type poll vote
+    // awaiting_content -> meal type chosen, waiting for the photo/text itself
+    public const BACKDATE_AWAITING_DAY = 'awaiting_day';
+    public const BACKDATE_AWAITING_MEAL = 'awaiting_meal';
+    public const BACKDATE_AWAITING_CONTENT = 'awaiting_content';
 
     public function __construct(private readonly \PDO $conn)
     {
@@ -71,6 +80,113 @@ final class PersonaRepository
     }
 
     /**
+     * Every persona row — backs bin/backfill_persona_contact_info.php, which
+     * re-fetches Green API contact info for people who onboarded before this
+     * codebase captured the profile picture / pushname correctly.
+     *
+     * @return array<int,array{number:string,identifier:string,name:string,shortname:string,foto:string}>
+     */
+    public function findAllPersonas(): array
+    {
+        $stmt = $this->conn->query('SELECT `number`, identifier, name, shortname, foto FROM persona');
+
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Every persona with their full contact info plus meal-count/last-activity
+     * stats — backs the admin panel's user list (public/admin/index.php).
+     * Ordered with the most recently active people first, and anyone who
+     * never logged a meal at the bottom.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    public function findAllWithStats(): array
+    {
+        $pushnameSelect = Database::tableHasColumn($this->conn, 'persona', 'pushname')
+            ? 'p.pushname'
+            : "'' AS pushname";
+
+        $sql = "SELECT p.number, p.identifier, p.name, p.shortname, {$pushnameSelect}, p.foto,
+                       p.age_range, p.weight_range, p.water_frequency, p.onboarding_step,
+                       COUNT(n.id) AS total_meals, MAX(n.datetime) AS last_meal_at
+                FROM persona p
+                LEFT JOIN nutri n ON n.identifier = p.identifier
+                GROUP BY p.number
+                ORDER BY last_meal_at IS NULL, last_meal_at DESC";
+
+        return $this->conn->query($sql)->fetchAll();
+    }
+
+    /**
+     * Full contact info for one identifier — backs the admin panel's
+     * per-user detail page (public/admin/persona.php).
+     *
+     * @return array<string,mixed>|null
+     */
+    public function findByIdentifier(string $identifier): ?array
+    {
+        $pushnameSelect = Database::tableHasColumn($this->conn, 'persona', 'pushname')
+            ? 'pushname'
+            : "'' AS pushname";
+
+        $stmt = $this->conn->prepare(
+            "SELECT `number`, identifier, name, shortname, {$pushnameSelect}, foto,
+                    age_range, weight_range, water_frequency, onboarding_step
+             FROM persona WHERE identifier = ? LIMIT 1"
+        );
+        $stmt->execute([$identifier]);
+        $row = $stmt->fetch();
+
+        return $row !== false ? $row : null;
+    }
+
+    /**
+     * Fills in whatever Green API's GetContactInfo actually returned for this
+     * chat — name / shortname / foto (profilePicUrl) / pushname (only when
+     * that column exists) — without touching fields Green API didn't have a
+     * value for, so a temporary gap in Green API's response never blanks out
+     * data this persona already had. Returns whether anything was updated.
+     *
+     * @param array{name?:string,shortName?:string,pushname?:string,profilePicUrl?:string} $contact
+     */
+    public function updateContactInfo(string $chatId, array $contact): bool
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return false;
+        }
+
+        $fieldsToColumns = [
+            'name'          => 'name',
+            'shortName'     => 'shortname',
+            'profilePicUrl' => 'foto',
+        ];
+        if (Database::tableHasColumn($this->conn, 'persona', 'pushname')) {
+            $fieldsToColumns['pushname'] = 'pushname';
+        }
+
+        $sets = [];
+        $values = [];
+        foreach ($fieldsToColumns as $contactKey => $column) {
+            if (($contact[$contactKey] ?? '') !== '') {
+                $sets[] = "{$column} = ?";
+                $values[] = $contact[$contactKey];
+            }
+        }
+
+        if ($sets === []) {
+            return false;
+        }
+
+        $values[] = $number;
+        $stmt = $this->conn->prepare('UPDATE persona SET ' . implode(', ', $sets) . ' WHERE `number` = ?');
+        $stmt->execute($values);
+
+        return true;
+    }
+
+    /**
      * Sets how many times per day (3-12) the water reminder should fire for
      * this chat, or clears it (NULL = disabled) when $frequency is 0.
      * Returns the stored value, or null on invalid input.
@@ -109,14 +225,15 @@ final class PersonaRepository
     }
 
     /**
-     * Returns the identifier for a number, creating a new persona row if needed.
+     * Returns the identifier for a number, creating a new persona row if
+     * needed. $contact is whatever GreenApiClient::getContactInfo() returned
+     * (any subset of name/shortName/pushname/profilePicUrl — all optional,
+     * since Green API doesn't always have all of them for a given number).
+     *
+     * @param array{name?:string,shortName?:string,pushname?:string,profilePicUrl?:string} $contact
      */
-    public function getOrCreateIdentifier(
-        string $number,
-        string $name = '',
-        string $shortName = '',
-        string $photo = ''
-    ): string {
+    public function getOrCreateIdentifier(string $number, array $contact = []): string
+    {
         $number = self::normalizePhone($number);
         if ($number === '') {
             throw new \RuntimeException('Número inválido para generar identifier.');
@@ -127,14 +244,66 @@ final class PersonaRepository
             return $found;
         }
 
-        $identifier = $this->generateIdentifier();
+        $hasPushname = Database::tableHasColumn($this->conn, 'persona', 'pushname');
 
+        $columns = ['`number`', 'name', 'shortname', 'foto'];
+        $values = [
+            $number,
+            $contact['name'] ?? '',
+            $contact['shortName'] ?? '',
+            // "foto" holds the profile picture URL — NOT the pushname (a past
+            // bug here meant it never stored an actual photo at all).
+            $contact['profilePicUrl'] ?? '',
+        ];
+
+        if ($hasPushname) {
+            $columns[] = 'pushname';
+            $values[] = $contact['pushname'] ?? '';
+        }
+
+        // identifier/onboarding_step are appended after the loop below fills
+        // in a fresh identifier each retry; values order must match $columns.
+        $columns[] = 'identifier';
+        $columns[] = 'onboarding_step';
+
+        $placeholders = implode(', ', array_fill(0, count($columns), '?'));
         $insert = $this->conn->prepare(
-            'INSERT INTO persona (`number`, name, shortname, foto, identifier, onboarding_step) VALUES (?, ?, ?, ?, ?, ?)'
+            sprintf('INSERT INTO persona (%s) VALUES (%s)', implode(', ', $columns), $placeholders)
         );
-        $insert->execute([$number, $name, $shortName, $photo, $identifier, self::ONBOARDING_AWAITING_AGE]);
 
-        return $identifier;
+        // Collisions are very unlikely (6 chars over an 18-char alphabet) but
+        // not impossible — retry with a fresh identifier a few times instead
+        // of letting the UNIQUE-key violation bubble up as an uncaught 500.
+        $lastException = null;
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $identifier = $this->generateIdentifier();
+
+            try {
+                $insert->execute([...$values, $identifier, self::ONBOARDING_AWAITING_AGE]);
+                return $identifier;
+            } catch (\PDOException $e) {
+                if (!self::isDuplicateKeyViolation($e)) {
+                    throw $e;
+                }
+                $lastException = $e;
+            }
+        }
+
+        throw new \RuntimeException(
+            'No se pudo generar un identifier único tras varios intentos.',
+            0,
+            $lastException
+        );
+    }
+
+    private static function isDuplicateKeyViolation(\PDOException $e): bool
+    {
+        // SQLSTATE 23000 = integrity constraint violation (MySQL error 1062
+        // for duplicate key specifically, but the SQLSTATE alone is enough
+        // here since this INSERT can only violate the identifier UNIQUE key
+        // or the number PRIMARY KEY, and a duplicate number would already
+        // have been caught by lookupIdentifier() above).
+        return $e->getCode() === '23000';
     }
 
     /**
@@ -208,12 +377,7 @@ final class PersonaRepository
 
         $contact = $greenApi->getContactInfo($chatId) ?? [];
 
-        return $this->getOrCreateIdentifier(
-            $number,
-            $contact['name'] ?? '',
-            $contact['shortName'] ?? '',
-            $contact['pushname'] ?? ''
-        );
+        return $this->getOrCreateIdentifier($number, $contact);
     }
 
     public function identifierExists(string $identifier): bool
@@ -310,6 +474,73 @@ final class PersonaRepository
 
         $stmt = $this->conn->prepare('UPDATE persona SET pending_text_meal = ? WHERE `number` = ?');
         $stmt->execute([$mealType, $number]);
+    }
+
+    /**
+     * Current step of the "cargar" backdated-meal flow for this chat, if any
+     * — see the BACKDATE_* constants above. Defaults to null (not in the
+     * flow), same convention as getPendingMealReminder()/getPendingTextMeal().
+     */
+    public function getPendingBackdateStep(string $chatId): ?string
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return null;
+        }
+
+        $stmt = $this->conn->prepare('SELECT pending_backdate_step FROM persona WHERE `number` = ? LIMIT 1');
+        $stmt->execute([$number]);
+        $value = $stmt->fetchColumn();
+
+        return ($value !== false && $value !== null && $value !== '') ? (string)$value : null;
+    }
+
+    public function getPendingBackdateDate(string $chatId): ?string
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return null;
+        }
+
+        $stmt = $this->conn->prepare('SELECT pending_backdate_date FROM persona WHERE `number` = ? LIMIT 1');
+        $stmt->execute([$number]);
+        $value = $stmt->fetchColumn();
+
+        return ($value !== false && $value !== null && $value !== '') ? (string)$value : null;
+    }
+
+    public function getPendingBackdateMeal(string $chatId): ?string
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return null;
+        }
+
+        $stmt = $this->conn->prepare('SELECT pending_backdate_meal FROM persona WHERE `number` = ? LIMIT 1');
+        $stmt->execute([$number]);
+        $value = $stmt->fetchColumn();
+
+        return ($value !== false && $value !== null && $value !== '') ? (string)$value : null;
+    }
+
+    /**
+     * Advances (or starts/clears, when $step is null) the "cargar" flow,
+     * optionally recording the chosen date and/or meal type at the same time
+     * — one UPDATE per transition instead of three separate setters.
+     */
+    public function setPendingBackdate(string $chatId, ?string $step, ?string $date = null, ?string $mealType = null): void
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return;
+        }
+
+        $stmt = $this->conn->prepare(
+            'UPDATE persona
+             SET pending_backdate_step = ?, pending_backdate_date = ?, pending_backdate_meal = ?
+             WHERE `number` = ?'
+        );
+        $stmt->execute([$step, $date, $mealType, $number]);
     }
 
     private function generateIdentifier(int $length = 6): string

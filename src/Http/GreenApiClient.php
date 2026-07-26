@@ -62,6 +62,65 @@ final class GreenApiClient
     }
 
     /**
+     * Sends an interactive list message (WhatsApp "list" UI): a single button
+     * that opens a menu of tappable rows, grouped into sections. Falls back
+     * gracefully at the call site if Green API rejects it (older client
+     * versions/instance types don't all support it) — callers should catch
+     * failures and send a plain-text menu instead.
+     *
+     * @param array<int,array{title:string,rows:array<int,array{title:string,description?:string,rowId:string}>}> $sections
+     */
+    public function sendListMessage(string $chatId, string $message, string $buttonText, array $sections): array
+    {
+        return $this->request('sendListMessage', [
+            'chatId'     => $chatId,
+            'message'    => $message,
+            'buttonText' => $buttonText,
+            'sections'   => $sections,
+        ]);
+    }
+
+    /**
+     * Sends a file by public URL (e.g. a generated chart image) alongside a
+     * caption — same public-URL pattern already used for meal photos served
+     * from public/photos.
+     */
+    public function sendFileByUrl(string $chatId, string $urlFile, string $fileName, string $caption = ''): array
+    {
+        return $this->request('sendFileByUrl', [
+            'chatId'   => $chatId,
+            'urlFile'  => $urlFile,
+            'fileName' => $fileName,
+            'caption'  => $caption,
+        ]);
+    }
+
+    /**
+     * Marks a chat (optionally up to a specific message) as read, so the
+     * sender sees the double-tick without waiting for our reply. Best-effort:
+     * callers should swallow failures rather than block message processing.
+     */
+    public function readChat(string $chatId, string $idMessage = ''): array
+    {
+        $payload = ['chatId' => $chatId];
+        if ($idMessage !== '') {
+            $payload['idMessage'] = $idMessage;
+        }
+
+        return $this->request('readChat', $payload);
+    }
+
+    /**
+     * Instance connection state (e.g. "authorized", "notAuthorized",
+     * "blocked") — backs bin/check_instance_health.php. Unlike the rest of
+     * this client, Green API exposes this as a GET endpoint with no body.
+     */
+    public function getStateInstance(): array
+    {
+        return $this->request('getStateInstance', [], 'GET');
+    }
+
+    /**
      * Resolves the downloadable file URL for a media message when the webhook
      * payload itself did not include one.
      */
@@ -89,7 +148,7 @@ final class GreenApiClient
      * @param array<string,mixed> $payload
      * @return array{status:int,error:?string,response:?string,data:mixed}
      */
-    private function request(string $endpoint, array $payload): array
+    private function request(string $endpoint, array $payload, string $method = 'POST'): array
     {
         $url = sprintf(
             '%s/waInstance%s/%s/%s',
@@ -100,13 +159,20 @@ final class GreenApiClient
         );
 
         $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_POST           => true,
+        $options = [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
-            CURLOPT_HTTPHEADER     => ['Content-Type: application/json; charset=utf-8'],
             CURLOPT_TIMEOUT        => 30,
-        ]);
+        ];
+
+        if ($method === 'GET') {
+            $options[CURLOPT_HTTPGET] = true;
+        } else {
+            $options[CURLOPT_POST] = true;
+            $options[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_UNICODE);
+            $options[CURLOPT_HTTPHEADER] = ['Content-Type: application/json; charset=utf-8'];
+        }
+
+        curl_setopt_array($ch, $options);
 
         $response = curl_exec($ch);
         $error = curl_error($ch) ?: null;

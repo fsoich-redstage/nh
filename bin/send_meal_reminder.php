@@ -50,7 +50,7 @@ foreach ($personas->findActivePersonas() as $persona) {
     $chatId = str_ends_with($number, '@c.us') ? $number : $number . '@c.us';
 
     foreach (MealWindows::all() as $mealType) {
-        if ($currentHour < MealWindows::startHour($mealType) || $currentHour >= MealWindows::endHour($mealType)) {
+        if (!MealWindows::isWithinWindow($mealType, $currentHour)) {
             continue; // outside this meal's own window entirely
         }
 
@@ -59,8 +59,8 @@ foreach ($personas->findActivePersonas() as $persona) {
         }
 
         $averageHour = $nutrition->findAverageMealHour($identifier, $mealType);
-        $targetHour = $averageHour !== null
-            ? max(MealWindows::startHour($mealType), min(MealWindows::endHour($mealType) - 1, (int)round($averageHour)))
+        $targetHour = $averageHour !== null && MealWindows::isWithinWindow($mealType, (int)round($averageHour))
+            ? (int)round($averageHour)
             : MealWindows::defaultHour($mealType);
 
         if ($currentHour !== $targetHour) {

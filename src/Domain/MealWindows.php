@@ -57,6 +57,24 @@ final class MealWindows
         return self::WINDOWS[$mealType]['end'] ?? 24;
     }
 
+    /**
+     * Whether $hour (0-23) falls within $mealType's window. CENA wraps past
+     * midnight (19-24 plus 0-8, since classifyHour() treats the small hours
+     * as a continuation of the previous night's dinner rather than an
+     * undefined bucket) — every other meal's window is a plain same-day range.
+     */
+    public static function isWithinWindow(string $mealType, int $hour): bool
+    {
+        $start = self::startHour($mealType);
+        $end = self::endHour($mealType);
+
+        if ($mealType === 'CENA') {
+            return $hour >= $start || $hour < self::startHour('DESAYUNO');
+        }
+
+        return $hour >= $start && $hour < $end;
+    }
+
     public static function defaultHour(string $mealType): int
     {
         return self::WINDOWS[$mealType]['default_hour'] ?? 12;

@@ -5,6 +5,7 @@ require __DIR__ . '/../src/autoload.php';
 
 use NutriHelper\Config;
 use NutriHelper\Db\Database;
+use NutriHelper\Domain\DayChartRenderer;
 use NutriHelper\Domain\EventDeduplicator;
 use NutriHelper\Domain\MealWindows;
 use NutriHelper\Http\GreenApiClient;
@@ -37,6 +38,10 @@ $greenApi = new GreenApiClient(Config::greenApi());
 $openAi = new OpenAiClient(Config::get('OPENAI_API_KEY'));
 $personas = new PersonaRepository($conn);
 $nutrition = new NutritionRepository($conn);
+$chartRenderer = new DayChartRenderer(
+    Config::getOptional('NUTRI_IMAGE_DIR', __DIR__ . '/../public/photos'),
+    rtrim(Config::get('NUTRI_LANDING_BASE_URL'), '/') . Config::getOptional('NUTRI_IMAGE_PUBLIC_PATH', '/photos')
+);
 
 $targets = $nutrition->findTodaysSummaryTargets();
 
@@ -62,7 +67,9 @@ foreach ($targets as $target) {
         $totals['carbohidratos'] += (int)($entry['carbohidratos'] ?? 0);
         $totals['grasas'] += (int)($entry['grasas'] ?? 0);
 
-        $hora = (new DateTime((string)($entry['datetime'] ?? 'now')))->modify('-3 hours')->format('H:i');
+        $hora = (new DateTime((string)($entry['datetime'] ?? 'now'), new DateTimeZone('UTC')))
+            ->setTimezone($tzLocal)
+            ->format('H:i');
         $hour = (int)substr($hora, 0, 2);
         // Prefer the meal type stored with the entry (accurate even for a
         // late text entry logged outside its natural window); fall back to
@@ -95,6 +102,15 @@ foreach ($targets as $target) {
         }
 
         $sendResult = $greenApi->sendMessage($chatId, implode("\n", $reply));
+
+        // Best-effort chart attachment — never let a rendering/upload hiccup
+        // block the text summary that already went out above.
+        try {
+            $chartUrl = $chartRenderer->render($identifier, $totals);
+            $greenApi->sendFileByUrl($chatId, $chartUrl, 'resumen_' . $identifier . '.png', '📊 Tus macros de hoy');
+        } catch (Throwable $e) {
+            error_log('Nutri Helper: fallo generando chart diario para ' . $identifier . ': ' . $e->getMessage());
+        }
 
         $results[] = ['to' => $chatId, 'identifier' => $identifier, 'status' => $sendResult['status']];
     } catch (Throwable $e) {
