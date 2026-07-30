@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-require __DIR__ . '/../../src/autoload.php';
+require __DIR__ . '/../src/autoload.php';
 
 use NutriHelper\Config;
 use NutriHelper\Db\Database;
@@ -9,7 +9,7 @@ use NutriHelper\Http\AdminAuth;
 use NutriHelper\Repository\PersonaRepository;
 use NutriHelper\View\AdminRenderer;
 
-Config::load(__DIR__ . '/../../.env');
+Config::load(__DIR__ . '/../.env');
 
 AdminAuth::require();
 

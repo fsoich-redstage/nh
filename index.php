@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-require __DIR__ . '/../src/autoload.php';
+require __DIR__ . '/src/autoload.php';
 
 use NutriHelper\Config;
 use NutriHelper\Db\Database;
@@ -9,7 +9,7 @@ use NutriHelper\Repository\NutritionRepository;
 use NutriHelper\Repository\PersonaRepository;
 use NutriHelper\View\LandingRenderer;
 
-Config::load(__DIR__ . '/../.env');
+Config::load(__DIR__ . '/.env');
 
 header('Content-Type: text/html; charset=utf-8');
 

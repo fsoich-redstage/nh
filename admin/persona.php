@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-require __DIR__ . '/../../src/autoload.php';
+require __DIR__ . '/../src/autoload.php';
 
 use NutriHelper\Config;
 use NutriHelper\Db\Database;
@@ -10,13 +10,13 @@ use NutriHelper\Repository\NutritionRepository;
 use NutriHelper\Repository\PersonaRepository;
 use NutriHelper\View\AdminRenderer;
 
-Config::load(__DIR__ . '/../../.env');
+Config::load(__DIR__ . '/../.env');
 
 AdminAuth::require();
 
 header('Content-Type: text/html; charset=utf-8');
 
-// Same sanitization as public/index.php: strip anything that isn't A-Z/0-9.
+// Same sanitization as index.php: strip anything that isn't A-Z/0-9.
 $identifier = strtoupper((string)preg_replace('/[^A-Z0-9]/i', '', (string)($_GET['identifier'] ?? '')));
 
 if ($identifier === '') {

@@ -39,7 +39,7 @@ $openAi = new OpenAiClient(Config::get('OPENAI_API_KEY'));
 $personas = new PersonaRepository($conn);
 $nutrition = new NutritionRepository($conn);
 $chartRenderer = new DayChartRenderer(
-    Config::getOptional('NUTRI_IMAGE_DIR', __DIR__ . '/../public/photos'),
+    Config::getOptional('NUTRI_IMAGE_DIR', __DIR__ . '/../photos'),
     rtrim(Config::get('NUTRI_LANDING_BASE_URL'), '/') . Config::getOptional('NUTRI_IMAGE_PUBLIC_PATH', '/photos')
 );
 

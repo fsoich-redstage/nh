@@ -4,9 +4,9 @@ declare(strict_types=1);
 namespace NutriHelper\View;
 
 /**
- * Renders the two admin-only pages: the full user list (public/admin/index.php)
+ * Renders the two admin-only pages: the full user list (admin/index.php)
  * and one user's full contact info + meal history with photos
- * (public/admin/persona.php). Both are gated by AdminAuth — this view never
+ * (admin/persona.php). Both are gated by AdminAuth — this view never
  * decides who's allowed to see it, only how to show it.
  */
 final class AdminRenderer

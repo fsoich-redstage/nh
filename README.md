@@ -13,7 +13,7 @@ bin/send_water_reminder.php   # script de cron (correr cada hora): envía el rec
 bin/send_daily_summary.php    # script de cron (correr cada hora): a la hora configurada, manda el
                                # resumen diario (una sola llamada a OpenAI por persona), consejo para
                                # mañana y un chart de macros del día
-bin/send_meal_reminder.php    # script de cron (correr cada hora): pregunta por poll si te olvidaste
+bin/send_meal_reminder.php    # script de cron (correr cada hora): pregunta con botones si te olvidaste
                                # de una comida, según tu hora habitual de esa comida
 bin/send_monday_kickoff.php   # script de cron (correr lunes de 8 a 12): envión de arranque de
                                # semana para quien registró comidas la semana pasada
@@ -21,17 +21,17 @@ bin/check_instance_health.php # script de cron (cada 5-15 min): alerta si la ins
                                # se desconectó, ya que ahí todos los demás crons fallan en silencio
 bin/backfill_persona_contact_info.php # script manual, una sola vez: re-completa name/shortname/foto/
                                # pushname desde Green API para personas que ya existían
-public/webhook.php            # webhook de Green API (onboarding, comandos de texto, análisis de imagen);
+webhook.php                   # webhook de Green API (onboarding, comandos de texto, análisis de imagen);
                                # requiere ?token=<GREEN_API_WEBHOOK_TOKEN> en la URL configurada
-public/index.php              # front door del sitio (?identifier=XXXX): historial real o landing promocional
-public/photos/                # fotos servidas públicamente (mismo esquema que producción), gitignored
-public/admin/index.php        # panel admin: listado de todos los usuarios + stats (protegido, HTTP Basic Auth)
-public/admin/persona.php      # panel admin: detalle de un usuario (contacto completo + todas sus comidas/fotos)
+index.php                     # front door del sitio (?identifier=XXXX): historial real o landing promocional
+photos/                       # fotos servidas públicamente (mismo esquema que producción), gitignored
+admin/index.php                # panel admin: listado de todos los usuarios + stats (protegido, HTTP Basic Auth)
+admin/persona.php              # panel admin: detalle de un usuario (contacto completo + todas sus comidas/fotos)
 src/Config.php                # loader de .env, sin fallback hardcodeado
 src/autoload.php              # autoload PSR-4 manual (namespace NutriHelper\)
-src/Http/GreenApiClient.php   # sendMessage / GetContactInfo / downloadFile / sendPoll
+src/Http/GreenApiClient.php   # sendMessage / GetContactInfo / downloadFile / sendInteractiveButtons / sendListMessage
 src/Http/OpenAiClient.php     # análisis nutricional vía Responses API
-src/Http/AdminAuth.php        # guard de HTTP Basic Auth para public/admin/
+src/Http/AdminAuth.php        # guard de HTTP Basic Auth para admin/
 src/Db/Database.php           # conexión PDO
 src/Repository/               # PersonaRepository, NutritionRepository
 src/Domain/                   # normalización de payload, ruteo de mensajes, parser de análisis, storage de imágenes, dedupe, scheduler de agua
@@ -50,23 +50,23 @@ logs/                         # logs de la app (gitignored), rotan solos pasados
      el webhook rechaza cualquier request sin este token
    - `OPENAI_API_KEY`
    - `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
-   - `NUTRI_IMAGE_DIR` → ruta absoluta a `public/photos` (debe ser servida
+   - `NUTRI_IMAGE_DIR` → ruta absoluta a `photos/` (debe ser servida
      públicamente por el webserver, igual que en producción: las fotos se ven
      por URL directa; también se usa para los charts del resumen diario)
    - `NUTRI_IMAGE_PUBLIC_PATH` (default `/photos`)
-   - `NUTRI_LANDING_BASE_URL` (dominio público donde vive `public/index.php`)
+   - `NUTRI_LANDING_BASE_URL` (dominio público donde vive `index.php`)
    - `NUTRI_BOT_WHATSAPP_LINK` (link `https://wa.me/...` mostrado en la
      landing promocional)
    - `NUTRI_HEALTH_ALERT_WEBHOOK_URL` (opcional) → webhook de Slack/Discord/etc.
      notificado si la instancia de Green API se desconecta
 2. Crear las tablas (ver esquema abajo).
-3. Apuntar el servidor web (nginx/Apache) a `public/` como document root,
-   con `index.php` como índice por defecto — `public/index.php` es el punto
-   de entrada del sitio (`/` y `/?identifier=XXXX`).
+3. Apuntar el servidor web (nginx/Apache/hosting compartido) a la raíz del
+   proyecto como document root, con `index.php` como índice por defecto —
+   `index.php` es el punto de entrada del sitio (`/` y `/?identifier=XXXX`).
 4. Configurar el webhook de Green API para que apunte a
    `https://tu-dominio/webhook.php?token=<GREEN_API_WEBHOOK_TOKEN>` (notificaciones
    de mensajes entrantes, incluye `incomingMessageReceived` para texto/imagen/voto
-   de encuesta). **El `?token=` es obligatorio** — sin autenticación, cualquiera que
+   de lista/botón interactivo). **El `?token=` es obligatorio** — sin autenticación, cualquiera que
    conozca la URL podría inyectar mensajes falsos a nombre de cualquier número.
 5. Programar `bin/check_instance_health.php` cada 5-15 minutos:
    `*/10 * * * * php /ruta/a/nutri-helper/bin/check_instance_health.php`.
@@ -118,13 +118,23 @@ comida de las personas que sí pasan ese filtro:
 3. Si no, calcula la "hora objetivo" para esa persona y esa comida:
    el promedio histórico de a qué hora la registra (solo con fotos, últimos
    30 registros — `NutritionRepository::findAverageMealHour`), o un default
-   razonable (ej. 9hs para desayuno) si todavía no tiene historial.
-4. Cuando la hora actual coincide con esa hora objetivo, manda **un solo**
-   poll ese día para esa comida (dedupe diario por identifier+comida):
-   *"¿Te olvidaste de mandar tu comida?"* con 3 opciones:
-   - **No comí**
-   - **Me salteé este/a \<comida\>** (con concordancia de género correcta)
-   - **Comí, me olvidé de mandar la foto**
+   razonable (ej. 9hs para desayuno) si todavía no tiene historial, y corre
+   el recordatorio **una hora después** de esa referencia, sin salirse de la
+   ventana de la comida.
+4. Cuando la hora actual coincide con esa hora objetivo desplazada, manda **un solo**
+   mensaje de botones interactivos (`sendInteractiveButtons`) ese día para
+   esa comida (dedupe diario por identifier+comida):
+   *"¿Te olvidaste de mandar tu comida?"* con 3 botones:
+   - **No comí** (`buttonId: no_comi`)
+   - **Me lo salteé** (`buttonId: salteado`)
+   - **Sin foto** (`buttonId: sin_foto`)
+
+   Los textos de los botones son cortos y genéricos a propósito (Green API
+   limita `buttonText` a 25 caracteres) — el nombre de la comida va en el
+   cuerpo del mensaje, no en el botón. Al tocar uno, Green API notifica el
+   webhook con `typeMessage: "templateButtonReplyMessage"`; se lee
+   `messageData.templateButtonReplyMessage.selectedId` y se matchea contra
+   esos 3 `buttonId` (ver `MessageRouter::MEAL_REMINDER_*`).
 
 Si contesta que comió pero se olvidó de mandar la foto, el bot le pide que
 cuente por texto qué comió (`persona.pending_text_meal`), y ese texto se
@@ -132,7 +142,7 @@ procesa igual que una foto: **una llamada a OpenAI sin imagen**
 (`OpenAiClient::analyzeMealFromText`, mismo prompt que el de foto pero
 aclarando que el consejo se basa en la descripción, no en una imagen) —
 calcula calorías/proteínas/carbohidratos/grasas y el consejo, y lo guarda
-con `foto = ''`. En `public/index.php` esas entradas se muestran igual que
+con `foto = ''`. En `index.php` esas entradas se muestran igual que
 las demás (con su tema de color por comida, usando `nutri.comida` en vez de
 inferir por hora) pero sin `<img>`, con un aviso de "cargado por texto".
 
@@ -152,7 +162,7 @@ registró al menos una comida hoy:
 4. Se arma un solo mensaje de WhatsApp: resumen + totales (calculados por
    nosotros, no por el modelo) + consejo para mañana.
 
-## Historial público (`public/index.php`)
+## Historial público (`index.php`)
 
 Porteado 1:1 del `index.php` real de producción (mismo HTML/CSS/JS: filtros
 por comida, "últimas 2 semanas", orden asc/desc, separadores de día,
@@ -168,51 +178,60 @@ Con `?identifier=XXXX`:
 Sin `identifier` → landing promocional directamente (mismo comportamiento
 que el sitio real).
 
-## Recordatorio de agua (encuesta de frecuencia)
+## Recordatorio de agua (lista de frecuencia)
 
-Cuando el usuario escribe "agua", el bot le manda una encuesta de WhatsApp
-(`sendPoll`) con opciones del 3 al 12 ("¿cuántas veces por día?"). Al votar,
-Green API notifica el webhook con `typeMessage: "pollUpdateMessage"`; se lee
-la opción elegida desde `messageData.pollMessageData.votes[].optionName`
-(matcheando `optionVoters` contra el chatId) y se guarda en
-`persona.water_frequency`.
+Cuando el usuario escribe "agua" (o lo tappea desde el menú), el bot le manda
+una lista interactiva de WhatsApp (`sendListMessage`) con filas del 3 al 12
+("¿cuántas veces por día?") y marca `persona.pending_water_poll = 1`. Al
+elegir una fila, Green API notifica el webhook con
+`typeMessage: "listResponseMessage"`; se lee la fila elegida desde
+`messageData.listResponseMessage.singleSelectReply` y se guarda en
+`persona.water_frequency`. `pending_water_poll` se limpia apenas se procesa
+la respuesta (o si mientras tanto se dispara cualquier otro comando), para
+que una lista de agua nunca contestada no quede "esperando" un tap que en
+realidad era para otra cosa.
 
 `bin/send_water_reminder.php` está pensado para correr **una vez por hora**.
 En cada corrida:
 1. Si la hora actual (huso horario `America/Argentina/Buenos_Aires`) está
-   fuera de la ventana 8-20hs, no hace nada.
+   fuera de la ventana 9-20hs, no hace nada.
 2. Para cada persona con `water_frequency` seteado (3-12), calcula —de forma
    determinística, sin guardar un horario— en qué horas del día le
    corresponde un recordatorio (`WaterReminderScheduler`, que reparte N
    avisos lo más parejo posible dentro de la ventana de 12hs) y solo le
    envía el mensaje si la hora actual es una de esas.
 
-Por ejemplo, frecuencia 3 → recordatorios a las 8, 12 y 16hs; frecuencia 6 →
-8, 10, 12, 14, 16 y 18hs; frecuencia 12 → una vez por hora, de 8 a 19hs.
+Por ejemplo, frecuencia 3 → recordatorios a las 9, 13 y 17hs; frecuencia 6 →
+9, 11, 13, 15, 17 y 19hs; frecuencia 12 → una vez por hora, de 9 a 20hs.
 
-## Onboarding guiado (edad y peso por encuesta)
+## Onboarding guiado (edad y peso por lista interactiva)
 
 La primera vez que un número le escribe al bot (`persona` no existía), en vez
 de un único mensaje de bienvenida ahora es un flujo de 3 pasos, reusando la
 misma lógica de alta de `persona` que ya existía:
 
 1. Se crea la fila en `persona` (con `onboarding_step = 'awaiting_age'`) y se
-   manda un saludo corto + la encuesta de rango de edad.
-2. Al votar, se guarda `age_range`, se avanza a `onboarding_step =
-   'awaiting_weight'` y se manda la encuesta de rango de peso.
-3. Al votar esa, se guarda `weight_range`, `onboarding_step` pasa a `'done'`,
-   y recién ahí se manda el mensaje de instrucciones (foto de las comidas, etc.).
+   manda un saludo corto + una lista interactiva (`sendListMessage`) con los
+   rangos de edad.
+2. Al elegir una fila (`typeMessage: "listResponseMessage"`, se lee
+   `messageData.listResponseMessage.singleSelectReply`), se guarda
+   `age_range`, se avanza a `onboarding_step = 'awaiting_weight'` y se manda
+   la lista de rango de peso.
+3. Al elegir esa, se guarda `weight_range`, `onboarding_step` pasa a
+   `'done'`, y recién ahí se manda el mensaje de instrucciones (foto de las
+   comidas, etc.).
 
-Mientras `onboarding_step` no es `'done'`, cualquier mensaje que no sea el
-voto esperado (texto, foto, lo que sea) se ignora y se le reenvía la encuesta
-pendiente — no puede saltarse el paso. Los números que ya existían antes de
-esta feature quedan con `onboarding_step = 'done'` por default de columna, así
-que no se les interrumpe nada.
+Mientras `onboarding_step` no es `'done'`, cualquier mensaje que no sea la
+selección esperada (texto, foto, lo que sea) se ignora y se le reenvía la
+lista pendiente — no puede saltarse el paso. Los números que ya existían
+antes de esta feature quedan con `onboarding_step = 'done'` por default de
+columna, así que no se les interrumpe nada.
 
-Igual que con el agua, cada encuesta se resuelve mirando
-`persona.onboarding_step`: si no está en `'done'`, cualquier voto de encuesta
-se interpreta como edad o peso según corresponda; recién cuando el onboarding
-terminó, un voto de encuesta se interpreta como frecuencia de agua.
+Igual que con el agua, cada lista se resuelve mirando
+`persona.onboarding_step`: si no está en `'done'`, cualquier selección de
+lista se interpreta como edad o peso según corresponda; recién cuando el
+onboarding terminó, una selección de lista puede interpretarse como
+frecuencia de agua (o un rowId del menú principal).
 
 ## Menú interactivo y comandos de texto
 
@@ -236,13 +255,15 @@ Una foto o texto normal siempre se registra con la fecha/hora actual — para
 una comida que te olvidaste de cargar en el momento, `cargar` arranca un flujo
 de 3 pasos con `persona.pending_backdate_step`:
 
-1. **`awaiting_day`**: se manda un poll "¿De qué día es la comida que querés
-   cargar?" con 7 opciones (Hoy, Ayer, Hace 2 días … Hace 6 días — mismo
-   horizonte que el historial semanal). Al votar, se guarda la fecha elegida
-   en `persona.pending_backdate_date` y se pasa a `awaiting_meal`.
-2. **`awaiting_meal`**: se manda un poll "¿Qué comida fue?" (Desayuno /
-   Almuerzo / Merienda / Cena). Al votar, se guarda en
-   `persona.pending_backdate_meal` y se pasa a `awaiting_content`.
+1. **`awaiting_day`**: se manda una lista interactiva "¿De qué día es la
+   comida que querés cargar?" con 7 filas (Hoy, Ayer, Hace 2 días … Hace 6
+   días — mismo horizonte que el historial semanal; el rowId es el offset en
+   días). Al elegir una, se guarda la fecha elegida en
+   `persona.pending_backdate_date` y se pasa a `awaiting_meal`.
+2. **`awaiting_meal`**: se manda una lista "¿Qué comida fue?" (Desayuno /
+   Almuerzo / Merienda / Cena; el rowId es la clave de `MealWindows`). Al
+   elegir una, se guarda en `persona.pending_backdate_meal` y se pasa a
+   `awaiting_content`.
 3. **`awaiting_content`**: el próximo mensaje (foto o texto) se procesa igual
    que una carga normal — mismo análisis de OpenAI, mismo límite de 4 comidas
    por día (aplicado al día elegido, no a hoy) y el mismo chequeo de "esa
@@ -254,8 +275,8 @@ de 3 pasos con `persona.pending_backdate_step`:
    real en que comió no es un dato que se pregunta, "ahora" sería incorrecto
    para un registro retroactivo.
 
-El flujo se puede interrumpir en cualquier punto simplemente ignorando el
-poll/mensaje pendiente — no hay timeout ni opción de "cancelar" explícita,
+El flujo se puede interrumpir en cualquier punto simplemente ignorando la
+lista/mensaje pendiente — no hay timeout ni opción de "cancelar" explícita,
 pero iniciar `cargar` de nuevo (o cualquier otro comando) pisa el estado
 anterior sin dejar el bot trabado.
 
@@ -291,11 +312,11 @@ correrlo de nuevo no rompe nada, solo vuelve a aplicar los mismos datos.
 `GetContactInfo` tiene rate limit por instancia, así que el script hace una
 pausa corta (300ms) entre personas.
 
-## Panel de administración (`public/admin/`)
+## Panel de administración (`admin/`)
 
 Panel de solo lectura para vos: listado de todos los usuarios con sus stats
-(`public/admin/index.php`) y, por cada uno, su info de contacto completa más
-**todas** las comidas que cargó, con las fotos (`public/admin/persona.php?identifier=XXXX`).
+(`admin/index.php`) y, por cada uno, su info de contacto completa más
+**todas** las comidas que cargó, con las fotos (`admin/persona.php?identifier=XXXX`).
 
 **Setup:**
 
@@ -349,7 +370,8 @@ CREATE TABLE persona (
     age_range       VARCHAR(16) NULL DEFAULT NULL,        -- ej. "26-35" (ver MessageRouter::AGE_RANGE_OPTIONS)
     weight_range    VARCHAR(16) NULL DEFAULT NULL,        -- ej. "70-80kg" (ver MessageRouter::WEIGHT_RANGE_OPTIONS)
     onboarding_step VARCHAR(24) NOT NULL DEFAULT 'done',   -- 'awaiting_age' | 'awaiting_weight' | 'done'
-    pending_meal_reminder VARCHAR(16) NULL DEFAULT NULL,   -- comida cuyo poll "¿te olvidaste?" está pendiente de respuesta
+    pending_meal_reminder VARCHAR(16) NULL DEFAULT NULL,   -- comida cuyo recordatorio "¿te olvidaste?" (botones) está pendiente de respuesta
+    pending_water_poll    TINYINT(1)  NOT NULL DEFAULT 0,   -- 1 mientras la lista de frecuencia de agua está pendiente de respuesta
     pending_text_meal     VARCHAR(16) NULL DEFAULT NULL,   -- comida que va a describir por texto (eligió "comí pero me olvidé")
     pending_backdate_step VARCHAR(24) NULL DEFAULT NULL,   -- 'awaiting_day' | 'awaiting_meal' | 'awaiting_content' (flujo "cargar")
     pending_backdate_date DATE        NULL DEFAULT NULL,   -- día elegido en el flujo "cargar", mientras está en curso
@@ -411,6 +433,14 @@ ALTER TABLE persona
 ALTER TABLE nutri
     ADD COLUMN consejo_actual TEXT NULL,
     ADD COLUMN comida VARCHAR(16) NULL DEFAULT NULL;
+
+ALTER TABLE persona
+    ADD COLUMN pending_water_poll TINYINT(1) NOT NULL DEFAULT 0;
+-- Necesaria para la migración de encuestas (sendPoll) a listas/botones
+-- interactivos: a diferencia del resto de los flujos "pendientes", una
+-- respuesta de la lista de frecuencia de agua no trae más dato que un
+-- número suelto, así que sin esta bandera no habría forma de distinguirla
+-- de cualquier otro tap de lista.
 ```
 
 ## Seguridad — pendiente antes de producción
@@ -424,7 +454,7 @@ hardcodeado — si falta una variable en `.env`, tira una excepción en vez de
 usar un valor por defecto, así que rotarlas después es solo cambiar `.env`.
 
 Ya resuelto en este repo:
-- **Autenticación del webhook**: `public/webhook.php` exige `?token=` matcheando
+- **Autenticación del webhook**: `webhook.php` exige `?token=` matcheando
   `GREEN_API_WEBHOOK_TOKEN` (comparación `hash_equals`, sin fallback). Antes
   cualquiera que descubriera la URL podía inyectar mensajes/fotos/votos falsos
   a nombre de cualquier `chatId`.
@@ -440,7 +470,7 @@ Ya resuelto en este repo:
   hacer prompt injection contra su propio análisis nutricional.
 
 Aun pendiente:
-- Rate limiting en `public/webhook.php` (hoy nada impide un flood de requests
+- Rate limiting en `webhook.php` (hoy nada impide un flood de requests
   autenticadas con un token filtrado, más allá del dedupe por idMessage).
 - HTTPS/TLS termination y hardening del webserver quedan fuera de este repo
   (responsabilidad del deploy).

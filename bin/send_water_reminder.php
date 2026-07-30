@@ -12,11 +12,11 @@ use NutriHelper\Repository\PersonaRepository;
 Config::load(__DIR__ . '/../.env');
 
 // Meant to run once per hour via cron; only actually sends anything during
-// each person's scheduled hour(s) inside the 8-20hs window.
+// each person's scheduled hour(s) inside the 9-20hs window.
 $currentHour = (int)(new DateTime('now', new DateTimeZone('America/Argentina/Buenos_Aires')))->format('G');
 
 if ($currentHour < WaterReminderScheduler::WINDOW_START_HOUR || $currentHour > WaterReminderScheduler::WINDOW_END_HOUR) {
-    echo json_encode(['ok' => true, 'sent' => 0, 'reason' => 'fuera del horario 8-20hs'], JSON_UNESCAPED_UNICODE), PHP_EOL;
+    echo json_encode(['ok' => true, 'sent' => 0, 'reason' => 'fuera del horario 9-20hs'], JSON_UNESCAPED_UNICODE), PHP_EOL;
     exit;
 }
 

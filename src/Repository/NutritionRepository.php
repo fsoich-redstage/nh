@@ -175,6 +175,31 @@ final class NutritionRepository
     }
 
     /**
+     * Meal types explicitly logged on an arbitrary local date, in
+     * chronological order without duplicates — used to show only the missing
+     * backdated-meal options for that day.
+     *
+     * @return string[]
+     */
+    public function fetchMealTypesOnDate(string $identifier, string $localDate): array
+    {
+        [$startUtc, $endUtc] = $this->boundsForLocalDate($localDate);
+
+        $stmt = $this->conn->prepare(
+            'SELECT comida FROM nutri
+             WHERE identifier = ? AND comida IS NOT NULL AND comida <> "" AND datetime >= ? AND datetime < ?
+             GROUP BY comida
+             ORDER BY MIN(datetime) ASC'
+        );
+        $stmt->execute([$identifier, $startUtc, $endUtc]);
+
+        return array_values(array_filter(
+            array_map(static fn (mixed $value): string => (string)$value, $stmt->fetchAll(\PDO::FETCH_COLUMN)),
+            static fn (string $mealType): bool => $mealType !== ''
+        ));
+    }
+
+    /**
      * Today's entries for an identifier, chronological — the raw material for
      * the end-of-day summary (includes the advice given at the time, if any).
      *

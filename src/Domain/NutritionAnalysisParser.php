@@ -188,13 +188,15 @@ final class NutritionAnalysisParser
         $actual = '';
         $proxima = '';
 
-        if (preg_match('/Consejo\s+actual:\s*(.+?)(?:\r?\n|$)/isu', $analysis, $m)) {
+        if (preg_match('/Consejo\s+actual:\s*(.+?)(?=\s*Consejo\s+pr[oó]xim(?:a\s+comida|o)\b|\r?\n|$)/isu', $analysis, $m)) {
             $actual = trim($m[1]);
         }
 
         if (preg_match('/Consejo\s+pr[oó]xima\s+comida[^\:]*:\s*(.+?)(?:\r?\n|$)/isu', $analysis, $m)) {
             $proxima = trim($m[1]);
-        } elseif (preg_match('/Consejo\s+pr[oó]ximo:\s*(.+?)(?:\r?\n|$)/isu', $analysis, $m)) {
+        } elseif (preg_match('/Consejo\s+pr[oó]ximo[^\:]*:\s*(.+?)(?:\r?\n|$)/isu', $analysis, $m)) {
+            $proxima = trim($m[1]);
+        } elseif (preg_match('/Pr[oó]xima\s+comida[^\:]*:\s*(.+?)(?:\r?\n|$)/isu', $analysis, $m)) {
             $proxima = trim($m[1]);
         }
 

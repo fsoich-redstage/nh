@@ -46,19 +46,31 @@ final class GreenApiClient
     }
 
     /**
-     * Sends a poll. Green API allows 2-12 options, message up to 255 chars,
-     * each option up to 100 chars, all unique.
+     * Sends up to 3 tappable reply buttons. For reply-style buttons Green API
+     * expects the dedicated sendInteractiveButtonsReply endpoint rather than
+     * the mixed-button sendInteractiveButtons one.
      *
-     * @param string[] $optionNames
+     * @param array<int,array{id:string,text:string}> $buttons
      */
-    public function sendPoll(string $chatId, string $message, array $optionNames, bool $multipleAnswers = false): array
+    public function sendInteractiveButtons(string $chatId, string $body, array $buttons, string $header = '', string $footer = ''): array
     {
-        return $this->request('sendPoll', [
-            'chatId'          => $chatId,
-            'message'         => $message,
-            'options'         => array_map(static fn (string $name) => ['optionName' => $name], $optionNames),
-            'multipleAnswers' => $multipleAnswers,
-        ]);
+        $payload = [
+            'chatId'  => $chatId,
+            'body'    => $body,
+            'buttons' => array_map(static fn (array $button) => [
+                'buttonId'   => $button['id'],
+                'buttonText' => $button['text'],
+            ], $buttons),
+        ];
+
+        if ($header !== '') {
+            $payload['header'] = $header;
+        }
+        if ($footer !== '') {
+            $payload['footer'] = $footer;
+        }
+
+        return $this->request('sendInteractiveButtonsReply', $payload);
     }
 
     /**
@@ -83,7 +95,7 @@ final class GreenApiClient
     /**
      * Sends a file by public URL (e.g. a generated chart image) alongside a
      * caption — same public-URL pattern already used for meal photos served
-     * from public/photos.
+     * from photos/.
      */
     public function sendFileByUrl(string $chatId, string $urlFile, string $fileName, string $caption = ''): array
     {

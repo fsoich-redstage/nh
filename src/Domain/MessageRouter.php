@@ -10,43 +10,51 @@ use NutriHelper\Repository\PersonaRepository;
 
 /**
  * Decides what to do with an incoming message: onboard a new number (a short
- * guided flow — age range, then weight range, both via WhatsApp polls — before
- * anything else is available), run the meal-photo analysis, resolve a missed
- * -meal reminder poll and the optional text-only follow-up it can trigger,
- * trigger/resolve the water-reminder frequency poll, answer "ayuda", or fall
- * back to the default instructions message.
+ * guided flow — age range, then weight range, both via WhatsApp interactive
+ * buttons — before anything else is available), run the meal-photo analysis,
+ * resolve a missed-meal reminder (interactive buttons) and the optional
+ * text-only follow-up it can trigger, trigger/resolve the water-reminder
+ * frequency list, answer "ayuda", or fall back to the default instructions
+ * message.
  */
 final class MessageRouter
 {
     private const MAX_MEALS_PER_DAY = 4;
 
-    private const AGE_RANGE_OPTIONS = ['18-25', '26-35', '36-45', '46-55', '56-65', '65+'];
-    private const WEIGHT_RANGE_OPTIONS = ['<60kg', '60-70kg', '70-80kg', '80-90kg', '90-100kg', '>100kg'];
+    private const AGE_RANGE_OPTIONS = ['18-35', '36-55', '56+'];
+    private const WEIGHT_RANGE_OPTIONS = ['<70kg', '70-90kg', '90kg+'];
+    private const WATER_FREQUENCY_OPTIONS = [4, 6, 8];
 
     /**
-     * "cargar" flow, step 1 (BACKDATE_AWAITING_DAY): poll option label ->
-     * days-ago offset, oldest week covered by the Monday nudge/history page.
+     * "cargar" flow, step 1 (BACKDATE_AWAITING_DAY): days-ago offset ->
+     * button label. The offset itself (as a string) is the button id.
      */
-    private const BACKDATE_DAY_OPTIONS = [
-        'Hoy'          => 0,
-        'Ayer'         => 1,
-        'Hace 2 días'  => 2,
-        'Hace 3 días'  => 3,
-        'Hace 4 días'  => 4,
-        'Hace 5 días'  => 5,
-        'Hace 6 días'  => 6,
+    private const BACKDATE_DAY_LABELS = [
+        0 => 'Hoy',
+        1 => 'Ayer',
+        2 => 'Hace 2 días',
     ];
 
     /**
-     * "cargar" flow, step 2 (BACKDATE_AWAITING_MEAL): poll option label ->
-     * MealWindows meal-type key.
+     * "cargar" flow, step 2 (BACKDATE_AWAITING_MEAL): MealWindows meal-type
+     * key -> button label. The meal-type key itself is the button id.
      */
-    private const BACKDATE_MEAL_OPTIONS = [
-        'Desayuno' => 'DESAYUNO',
-        'Almuerzo' => 'ALMUERZO',
-        'Merienda' => 'MERIENDA',
-        'Cena'     => 'CENA',
+    private const BACKDATE_MEAL_LABELS = [
+        'DESAYUNO' => 'Desayuno',
+        'ALMUERZO' => 'Almuerzo',
+        'MERIENDA' => 'Merienda',
+        'CENA'     => 'Cena',
     ];
+
+    /**
+     * rowIds for the missed-meal reminder menu. The prompt itself mentions
+     * which meal we're talking about; these ids stay meal-agnostic so the
+     * same parser works for desayuno/almuerzo/merienda/cena.
+     */
+    public const MEAL_REMINDER_NO_COMI = 'no_comi';
+    public const MEAL_REMINDER_DELAYED = 'me_retrase';
+    public const MEAL_REMINDER_CAPTURE_NOW = 'cargar_ahora';
+    public const MEAL_REMINDER_SALTEADO = 'salteado';
 
     public function __construct(
         private readonly GreenApiClient $greenApi,
@@ -75,37 +83,47 @@ final class MessageRouter
 
         $onboardingStep = $this->personas->getOnboardingStep($message->chatId);
 
-        if ($message->type === 'poll_vote') {
-            if ($onboardingStep !== PersonaRepository::ONBOARDING_DONE) {
-                $this->handleOnboardingPollVote($message, $onboardingStep);
-                return;
+        if ($onboardingStep !== PersonaRepository::ONBOARDING_DONE) {
+            if ($message->type === 'list_reply' || $message->type === 'button_reply' || $message->type === 'text') {
+                $this->handleOnboardingReply($message, $onboardingStep);
+            } else {
+                // Ignore whatever they sent and gently steer them back to the
+                // pending onboarding question instead of processing it as a
+                // normal command/photo.
+                $this->resendOnboardingStep($message->chatId, $onboardingStep);
             }
-
-            $pendingMealReminder = $this->personas->getPendingMealReminder($message->chatId);
-            if ($pendingMealReminder !== null) {
-                $this->handleMissedMealPollVote($message, $pendingMealReminder);
-                return;
-            }
-
-            $backdateStep = $this->personas->getPendingBackdateStep($message->chatId);
-            if ($backdateStep === PersonaRepository::BACKDATE_AWAITING_DAY) {
-                $this->handleBackdateDayPollVote($message);
-                return;
-            }
-            if ($backdateStep === PersonaRepository::BACKDATE_AWAITING_MEAL) {
-                $this->handleBackdateMealPollVote($message);
-                return;
-            }
-
-            $this->handleWaterPollVote($message);
             return;
         }
 
-        if ($onboardingStep !== PersonaRepository::ONBOARDING_DONE) {
-            // Ignore whatever they sent and gently steer them back to the
-            // pending onboarding question instead of processing it as a
-            // normal command/photo.
-            $this->resendOnboardingStep($message->chatId, $onboardingStep);
+        $pendingMealReminder = $this->personas->getPendingMealReminder($message->chatId);
+        if ($pendingMealReminder !== null) {
+            if ($message->type === 'list_reply' || $message->type === 'button_reply' || $message->type === 'text') {
+                $this->handleMissedMealReply($message, $pendingMealReminder);
+                return;
+            }
+
+            if ($message->type !== 'image') {
+                return;
+            }
+
+            // A direct photo should still be processed as the current meal
+            // window; don't let an old reminder swallow it.
+            $this->personas->setPendingMealReminder($message->chatId, null);
+        }
+
+        $backdateStep = $this->personas->getPendingBackdateStep($message->chatId);
+
+        if ($backdateStep === PersonaRepository::BACKDATE_AWAITING_DAY) {
+            if ($message->type === 'list_reply' || $message->type === 'button_reply' || $message->type === 'text') {
+                $this->handleBackdateDayReply($message);
+            }
+            return;
+        }
+
+        if ($backdateStep === PersonaRepository::BACKDATE_AWAITING_MEAL) {
+            if ($message->type === 'list_reply' || $message->type === 'button_reply' || $message->type === 'text') {
+                $this->handleBackdateMealReply($message);
+            }
             return;
         }
 
@@ -119,10 +137,30 @@ final class MessageRouter
 
         if (
             ($message->type === 'text' || $message->type === 'image')
-            && $this->personas->getPendingBackdateStep($message->chatId) === PersonaRepository::BACKDATE_AWAITING_CONTENT
+            && $backdateStep === PersonaRepository::BACKDATE_AWAITING_CONTENT
         ) {
             $this->handleBackdateContentEntry($message);
             return;
+        }
+
+        if ($message->type === 'list_reply' || $message->type === 'button_reply') {
+            if ($this->personas->getPendingWaterPoll($message->chatId) || $this->parseWaterFrequencyReply($message->body) !== null) {
+                $this->handleWaterFrequencyReply($message);
+                return;
+            }
+
+            $normalizedReply = $this->normalizeReplyCommand($message->body);
+            if (in_array($normalizedReply, ['agua', 'borrar', 'cargar', 'ayuda', 'menu'], true)) {
+                $this->dispatchCommand($message->chatId, $normalizedReply);
+            }
+            return;
+        }
+
+        if ($message->type === 'text') {
+            if ($this->personas->getPendingWaterPoll($message->chatId) || $this->parseWaterFrequencyReply($message->body) !== null) {
+                $this->handleWaterFrequencyReply($message);
+                return;
+            }
         }
 
         if ($message->type === 'image') {
@@ -135,7 +173,7 @@ final class MessageRouter
             return;
         }
 
-        // Other message types (e.g. status updates) are ignored.
+        // Other message types (button replies with no pending flow, status updates, etc.) are ignored.
     }
 
     private function startOnboarding(string $chatId): void
@@ -152,13 +190,65 @@ final class MessageRouter
             . 'Antes de arrancar quiero conocerte un poco mejor, son solo dos preguntas rápidas.'
         );
 
-        $this->greenApi->sendPoll($chatId, '🎂 ¿En qué rango de edad estás?', self::AGE_RANGE_OPTIONS, false);
+        $this->sendAgeRangeList($chatId);
     }
 
-    private function handleOnboardingPollVote(IncomingMessage $message, string $step): void
+    private function sendAgeRangeList(string $chatId): void
+    {
+        $this->sendButtonsWithFallback(
+            $chatId,
+            '🎂 ¿En qué rango de edad estás?',
+            $this->buildOptionButtons(self::AGE_RANGE_OPTIONS),
+            'Respondé con una de estas opciones: 18-35, 36-55, 56+.'
+        );
+    }
+
+    private function sendWeightRangeList(string $chatId): void
+    {
+        $this->sendButtonsWithFallback(
+            $chatId,
+            '💪 ¿Y tu rango de peso aproximado?',
+            $this->buildOptionButtons(self::WEIGHT_RANGE_OPTIONS),
+            'Respondé con una de estas opciones: <70kg, 70-90kg, 90kg+.'
+        );
+    }
+
+    /**
+     * @param string[] $options
+     * @return array<int,array{id:string,text:string}>
+     */
+    private function buildOptionButtons(array $options): array
+    {
+        return array_map(static fn (string $option) => ['id' => $option, 'text' => $option], $options);
+    }
+
+    /**
+     * @param array<int,array{id:string,text:string}> $buttons
+     */
+    private function sendButtonsWithFallback(string $chatId, string $body, array $buttons, string $fallbackMessage): void
+    {
+        $result = $this->greenApi->sendInteractiveButtons($chatId, $body, $buttons);
+
+        if ($result['status'] >= 400) {
+            $this->greenApi->sendMessage($chatId, $body . "\n\n" . $fallbackMessage);
+        }
+    }
+
+    /**
+     * @param array<int,array{title:string,rows:array<int,array{title:string,description?:string,rowId:string}>}> $sections
+     */
+    private function sendListWithFallback(string $chatId, string $body, string $buttonText, array $sections, string $fallbackMessage): void
+    {
+        $result = $this->greenApi->sendListMessage($chatId, $body, $buttonText, $sections);
+
+        if ($result['status'] >= 400) {
+            $this->greenApi->sendMessage($chatId, $body . "\n\n" . $fallbackMessage);
+        }
+    }
+
+    private function handleOnboardingReply(IncomingMessage $message, string $step): void
     {
         if ($message->body === '') {
-            // Empty vote (e.g. retracted selection) — nothing to persist yet.
             return;
         }
 
@@ -170,12 +260,7 @@ final class MessageRouter
             $this->personas->setAgeRange($message->chatId, $message->body);
             $this->personas->setOnboardingStep($message->chatId, PersonaRepository::ONBOARDING_AWAITING_WEIGHT);
 
-            $this->greenApi->sendPoll(
-                $message->chatId,
-                '💪 ¡Genial! ¿Y tu rango de peso aproximado?',
-                self::WEIGHT_RANGE_OPTIONS,
-                false
-            );
+            $this->sendWeightRangeList($message->chatId);
             return;
         }
 
@@ -198,41 +283,49 @@ final class MessageRouter
     private function resendOnboardingStep(string $chatId, string $step): void
     {
         if ($step === PersonaRepository::ONBOARDING_AWAITING_AGE) {
-            $this->greenApi->sendPoll($chatId, '🎂 ¿En qué rango de edad estás?', self::AGE_RANGE_OPTIONS, false);
+            $this->sendAgeRangeList($chatId);
             return;
         }
 
         if ($step === PersonaRepository::ONBOARDING_AWAITING_WEIGHT) {
-            $this->greenApi->sendPoll(
-                $chatId,
-                '💪 ¿Y tu rango de peso aproximado?',
-                self::WEIGHT_RANGE_OPTIONS,
-                false
-            );
+            $this->sendWeightRangeList($chatId);
         }
     }
 
     private function handleText(IncomingMessage $message): void
     {
-        $body = mb_strtolower(trim($message->body), 'UTF-8');
+        $this->dispatchCommand($message->chatId, mb_strtolower(trim($message->body), 'UTF-8'));
+    }
 
-        if ($body === 'agua') {
-            $this->handleWaterPollTrigger($message->chatId);
+    /**
+     * Shared by handleText() (typed commands) and route()'s main-menu
+     * interactive-reply branch (sendMainMenu()'s button ids are these same
+     * command words, so a tap and a typed command end up here identically).
+     */
+    private function dispatchCommand(string $chatId, string $command): void
+    {
+        // A stray, never-answered water-frequency list from earlier doesn't
+        // get to hijack the *next* list_reply once the person has moved on
+        // to a different command.
+        $this->personas->setPendingWaterPoll($chatId, false);
+
+        if ($command === 'agua') {
+            $this->handleWaterFrequencyTrigger($chatId);
             return;
         }
 
-        if ($body === 'borrar') {
-            $this->handleDeleteLastMeal($message->chatId);
+        if ($command === 'borrar') {
+            $this->handleDeleteLastMeal($chatId);
             return;
         }
 
-        if ($body === 'cargar') {
-            $this->handleBackdateTrigger($message->chatId);
+        if ($command === 'cargar') {
+            $this->handleBackdateTrigger($chatId);
             return;
         }
 
-        if ($body === 'ayuda') {
-            $this->greenApi->sendMessage($message->chatId, implode("\n", [
+        if ($command === 'ayuda') {
+            $this->greenApi->sendMessage($chatId, implode("\n", [
                 '📸 Consejo Nutri Helper:',
                 '1. Asegurate de que la foto esté bien iluminada.',
                 '2. Completa la descripcion.',
@@ -241,42 +334,33 @@ final class MessageRouter
             return;
         }
 
-        if ($body === 'menu') {
-            $this->sendMainMenu($message->chatId);
+        if ($command === 'menu') {
+            $this->sendMainMenu($chatId);
             return;
         }
 
-        $this->sendMainMenu($message->chatId, '¡Hola! Soy Nutri Helper.');
+        $this->sendMainMenu($chatId, '¡Hola! Soy Nutri Helper.');
     }
 
     /**
-     * Interactive list menu (WhatsApp list UI) with a plain-text fallback for
-     * instance/client combinations that reject sendListMessage.
+     * Interactive button menu with a plain-text fallback for instance/client
+     * combinations that reject button replies.
      */
     private function sendMainMenu(string $chatId, string $intro = ''): void
     {
         $header = $intro !== '' ? $intro . ' ' : '';
         $message = $header . 'Mandame una foto de tus comidas para analizarlas, o elegí una opción:';
 
-        $sections = [[
-            'title' => 'Nutri Helper',
-            'rows'  => [
-                ['rowId' => 'ayuda',  'title' => '📸 Ayuda',              'description' => 'Tips para sacarle provecho al bot'],
-                ['rowId' => 'agua',   'title' => '💧 Recordatorio de agua', 'description' => 'Elegí cuántas veces por día'],
-                ['rowId' => 'cargar', 'title' => '🗓️ Cargar comida atrasada', 'description' => 'Registrá una comida de otro día'],
-                ['rowId' => 'borrar', 'title' => '🗑️ Borrar última comida', 'description' => 'Deshace el último registro de hoy'],
+        $this->sendButtonsWithFallback(
+            $chatId,
+            $message,
+            [
+                ['id' => 'ayuda', 'text' => 'Ayuda'],
+                ['id' => 'agua', 'text' => 'Agua'],
+                ['id' => 'cargar', 'text' => 'Cargar'],
             ],
-        ]];
-
-        $result = $this->greenApi->sendListMessage($chatId, $message, 'Ver opciones', $sections);
-
-        if ($result['status'] >= 400) {
-            $this->greenApi->sendMessage($chatId, implode("\n", [
-                $message,
-                '',
-                'Escribí "ayuda", "agua", "cargar", "borrar" o "menu".',
-            ]));
-        }
+            'Escribí "ayuda", "agua", "cargar", "borrar" o "menu".'
+        );
     }
 
     private function handleDeleteLastMeal(string $chatId): void
@@ -308,39 +392,60 @@ final class MessageRouter
     {
         $this->personas->setPendingBackdate($chatId, PersonaRepository::BACKDATE_AWAITING_DAY);
 
-        $this->greenApi->sendPoll(
+        $buttons = [];
+        foreach (self::BACKDATE_DAY_LABELS as $offset => $label) {
+            $buttons[] = ['id' => (string)$offset, 'text' => $label];
+        }
+
+        $this->sendButtonsWithFallback(
             $chatId,
             '🗓️ ¿De qué día es la comida que querés cargar?',
-            array_keys(self::BACKDATE_DAY_OPTIONS),
-            false
+            $buttons,
+            'Respondé con: Hoy, Ayer o Hace 2 días.'
         );
     }
 
-    private function handleBackdateDayPollVote(IncomingMessage $message): void
+    private function handleBackdateDayReply(IncomingMessage $message): void
     {
-        if ($message->body === '' || !array_key_exists($message->body, self::BACKDATE_DAY_OPTIONS)) {
+        $rawBody = trim($message->body);
+        if ($rawBody === '') {
             return;
         }
 
-        $offsetDays = self::BACKDATE_DAY_OPTIONS[$message->body];
+        if (ctype_digit($rawBody) && array_key_exists((int)$rawBody, self::BACKDATE_DAY_LABELS)) {
+            $offsetDays = (int)$rawBody;
+        } else {
+            $normalizedBody = $this->normalizeReplyCommand($rawBody);
+            $offsetDays = array_search($normalizedBody, array_map(
+                fn (string $label): string => $this->normalizeReplyCommand($label),
+                self::BACKDATE_DAY_LABELS
+            ), true);
+
+            if ($offsetDays === false) {
+                return;
+            }
+        }
+
         $tzLocal = new \DateTimeZone('America/Argentina/Buenos_Aires');
         $date = (new \DateTime('today', $tzLocal))->modify("-{$offsetDays} days")->format('Y-m-d');
+        $availableMeals = $this->findAvailableBackdateMeals($message->chatId, $date);
 
-        $this->personas->setPendingBackdate($message->chatId, PersonaRepository::BACKDATE_AWAITING_MEAL, $date);
-
-        $this->greenApi->sendPoll(
-            $message->chatId,
-            '🍽️ ¿Qué comida fue?',
-            array_keys(self::BACKDATE_MEAL_OPTIONS),
-            false
-        );
-    }
-
-    private function handleBackdateMealPollVote(IncomingMessage $message): void
-    {
-        if ($message->body === '' || !array_key_exists($message->body, self::BACKDATE_MEAL_OPTIONS)) {
+        if ($availableMeals === []) {
+            $this->personas->setPendingBackdate($message->chatId, null);
+            $this->greenApi->sendMessage(
+                $message->chatId,
+                '⚠️ Ese día ya tiene las ' . self::MAX_MEALS_PER_DAY . ' comidas registradas.'
+            );
             return;
         }
+
+        $this->personas->setPendingBackdate($message->chatId, PersonaRepository::BACKDATE_AWAITING_MEAL, $date);
+        $this->sendBackdateMealOptions($message->chatId, $availableMeals);
+    }
+
+    private function handleBackdateMealReply(IncomingMessage $message): void
+    {
+        $mealType = mb_strtoupper(trim($message->body), 'UTF-8');
 
         $date = $this->personas->getPendingBackdateDate($message->chatId);
         if ($date === null) {
@@ -350,17 +455,112 @@ final class MessageRouter
             return;
         }
 
-        $mealType = self::BACKDATE_MEAL_OPTIONS[$message->body];
-        $this->personas->setPendingBackdate($message->chatId, PersonaRepository::BACKDATE_AWAITING_CONTENT, $date, $mealType);
+        $availableMeals = $this->findAvailableBackdateMeals($message->chatId, $date);
+        if ($availableMeals === []) {
+            $this->personas->setPendingBackdate($message->chatId, null);
+            $this->greenApi->sendMessage(
+                $message->chatId,
+                '⚠️ Ese día ya tiene las ' . self::MAX_MEALS_PER_DAY . ' comidas registradas.'
+            );
+            return;
+        }
+
+        if ($mealType === '' || !in_array($mealType, $availableMeals, true)) {
+            $this->sendBackdateMealOptions($message->chatId, $availableMeals);
+            return;
+        }
+
+        $this->startBackdateCaptureFlow($message->chatId, $date, $mealType);
+    }
+
+    private function startBackdateCaptureFlow(string $chatId, string $date, string $mealType, string $intro = ''): void
+    {
+        $this->personas->setPendingBackdate($chatId, PersonaRepository::BACKDATE_AWAITING_CONTENT, $date, $mealType);
+
+        $mealLabel = $this->mealTypeLabelLower($mealType);
+        $body = '📲 Mandame la foto o contame por texto tu ' . $mealLabel . ($this->isTodayLocalDate($date) ? ' de hoy' : ' de ese día') . '.';
+        if ($intro !== '') {
+            $body = $intro . "\n\n" . $body;
+        }
 
         $this->greenApi->sendMessage(
-            $message->chatId,
-            '✍️ Dale, mandame la foto o contame por texto qué comiste ese día.'
+            $chatId,
+            $body . ' Si querés, en la foto también podés sumar una descripción.'
         );
     }
 
     /**
-     * The photo or text sent right after completing the day+meal polls above
+     * @param string[] $mealTypes
+     */
+    private function sendBackdateMealOptions(string $chatId, array $mealTypes): void
+    {
+        $buttons = [];
+        foreach ($mealTypes as $mealType) {
+            $label = self::BACKDATE_MEAL_LABELS[$mealType] ?? $mealType;
+            $buttons[] = ['id' => $mealType, 'text' => $label];
+        }
+
+        $this->sendButtonsWithFallback(
+            $chatId,
+            '🍽️ ¿Qué comida fue?',
+            $buttons,
+            'Respondé con: ' . $this->formatBackdateMealFallback($mealTypes) . '.'
+        );
+    }
+
+    /**
+     * @return string[]
+     */
+    private function findAvailableBackdateMeals(string $chatId, string $date): array
+    {
+        $identifier = $this->personas->lookupIdentifier(PersonaRepository::normalizePhone($chatId));
+        if ($identifier === null) {
+            return [];
+        }
+
+        $loggedMealTypes = array_fill_keys($this->nutrition->fetchMealTypesOnDate($identifier, $date), true);
+        $availableMeals = [];
+
+        foreach (MealWindows::all() as $mealType) {
+            if (isset(self::BACKDATE_MEAL_LABELS[$mealType]) && !isset($loggedMealTypes[$mealType])) {
+                $availableMeals[] = $mealType;
+            }
+        }
+
+        if (count($availableMeals) === self::MAX_MEALS_PER_DAY) {
+            $availableMeals = array_values(array_filter(
+                $availableMeals,
+                static fn (string $mealType): bool => $mealType !== 'CENA'
+            ));
+        }
+
+        return $availableMeals;
+    }
+
+    /**
+     * @param string[] $mealTypes
+     */
+    private function formatBackdateMealFallback(array $mealTypes): string
+    {
+        $labels = array_map(
+            static fn (string $mealType): string => self::BACKDATE_MEAL_LABELS[$mealType] ?? $mealType,
+            $mealTypes
+        );
+
+        $lastLabel = array_pop($labels);
+        if ($lastLabel === null) {
+            return '';
+        }
+
+        if ($labels === []) {
+            return $lastLabel;
+        }
+
+        return implode(', ', $labels) . ' o ' . $lastLabel;
+    }
+
+    /**
+     * The photo or text sent right after completing the day+meal lists above
      * — stored with an explicit past datetime instead of NOW(). The hour is
      * this identifier's historical average for that meal type (same logic
      * bin/send_meal_reminder.php uses to time its reminders), since the
@@ -372,15 +572,16 @@ final class MessageRouter
         $chatId = $message->chatId;
         $date = $this->personas->getPendingBackdateDate($chatId);
         $mealType = $this->personas->getPendingBackdateMeal($chatId);
-        $this->personas->setPendingBackdate($chatId, null);
 
         if ($date === null || $mealType === null) {
+            $this->personas->setPendingBackdate($chatId, null);
             return;
         }
 
         $identifier = $this->personas->ensurePerson($this->greenApi, $chatId);
 
         if ($this->nutrition->countEntriesForIdentifierOnDate($identifier, $date) >= self::MAX_MEALS_PER_DAY) {
+            $this->personas->setPendingBackdate($chatId, null);
             $this->greenApi->sendMessage(
                 $chatId,
                 '⚠️ Ese día ya tiene el máximo de ' . self::MAX_MEALS_PER_DAY . ' comidas registradas.'
@@ -389,6 +590,7 @@ final class MessageRouter
         }
 
         if ($this->nutrition->hasMealTypeOnDate($identifier, $mealType, $date)) {
+            $this->personas->setPendingBackdate($chatId, null);
             $this->greenApi->sendMessage(
                 $chatId,
                 '⚠️ Ya tenías ' . mb_strtolower($mealType, 'UTF-8') . ' registrada para ese día.'
@@ -396,18 +598,12 @@ final class MessageRouter
             return;
         }
 
-        $averageHour = $this->nutrition->findAverageMealHour($identifier, $mealType);
-        $targetHour = $averageHour !== null
-            ? max(MealWindows::startHour($mealType), min(MealWindows::endHour($mealType) - 1, (int)round($averageHour)))
-            : MealWindows::defaultHour($mealType);
-
         $tzLocal = new \DateTimeZone('America/Argentina/Buenos_Aires');
-        $localDatetime = new \DateTime($date, $tzLocal);
-        $localDatetime->setTime($targetHour, 0);
+        $localDatetime = $this->resolveBackdateLocalDatetime($date, $mealType, $identifier, $tzLocal);
         $datetimeUtc = (clone $localDatetime)->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d H:i:s');
 
         $nextMealPhrase = MealWindows::nextMealPhrase($mealType);
-        $dateLabel = $localDatetime->format('d/m');
+        $dateLabel = $this->isTodayLocalDate($date) ? null : $localDatetime->format('d/m');
 
         if ($message->type === 'image') {
             $downloadUrl = $message->downloadUrl;
@@ -415,7 +611,7 @@ final class MessageRouter
                 $downloadUrl = $this->greenApi->downloadFileUrl($chatId, $message->idMessage);
             }
             if ($downloadUrl === '') {
-                $this->greenApi->sendMessage($chatId, 'No pude procesar tu imagen para guardarla.');
+                $this->greenApi->sendMessage($chatId, 'No pude procesar tu imagen. Probá mandarla de nuevo.');
                 return;
             }
 
@@ -426,14 +622,16 @@ final class MessageRouter
                 }
                 $base64 = base64_encode($imageBytes);
 
-                $analysisText = '';
                 try {
                     $analysisText = $this->openAi->analyzeMeal($message->body, $base64, $mealType, $nextMealPhrase);
-                } catch (\Throwable) {
-                    // Continue with zeros/empty analysis rather than failing the whole flow.
+                } catch (\Throwable $e) {
+                    error_log('Nutri Helper: fallo analizando comida atrasada por imagen: ' . $e->getMessage());
+                    $this->greenApi->sendMessage($chatId, 'No pude analizar esa foto en este momento. Probá mandarla de nuevo en un rato.');
+                    return;
                 }
 
                 $fileKey = $this->images->store($identifier, $base64);
+                $this->personas->setPendingBackdate($chatId, null);
 
                 $this->finalizeMealEntry(
                     $chatId,
@@ -447,7 +645,7 @@ final class MessageRouter
                 );
             } catch (\Throwable $e) {
                 error_log('Nutri Helper: fallo procesando imagen atrasada: ' . $e->getMessage());
-                $this->greenApi->sendMessage($chatId, 'No pude procesar tu imagen para guardarla.');
+                $this->greenApi->sendMessage($chatId, 'No pude guardar esa imagen. Probá mandarla de nuevo.');
             }
             return;
         }
@@ -466,32 +664,38 @@ final class MessageRouter
             return;
         }
 
+        $this->personas->setPendingBackdate($chatId, null);
         $this->finalizeMealEntry($chatId, $identifier, $mealType, '', $description, $analysisText, $datetimeUtc, $dateLabel);
     }
 
-    private function handleWaterPollTrigger(string $chatId): void
+    private function handleWaterFrequencyTrigger(string $chatId): void
     {
-        $options = array_map(
-            static fn (int $n) => (string)$n,
-            range(WaterReminderScheduler::MIN_FREQUENCY, WaterReminderScheduler::MAX_FREQUENCY)
+        $buttons = [];
+        foreach (self::WATER_FREQUENCY_OPTIONS as $frequency) {
+            $buttons[] = ['id' => (string)$frequency, 'text' => "{$frequency} veces"];
+        }
+
+        $this->sendButtonsWithFallback(
+            $chatId,
+            '💧 ¿Cuántas veces por día querés que te recuerde tomar agua? (entre las 9 y las 20 hs)',
+            $buttons,
+            'Respondé con: 4, 6 u 8.'
         );
 
-        $this->greenApi->sendPoll(
-            $chatId,
-            '💧 ¿Cuántas veces por día querés que te recuerde tomar agua? (entre las 8 y las 20 hs)',
-            $options,
-            false
-        );
+        $this->personas->setPendingWaterPoll($chatId, true);
     }
 
-    private function handleWaterPollVote(IncomingMessage $message): void
+    private function handleWaterFrequencyReply(IncomingMessage $message): void
     {
-        if ($message->body === '') {
-            // Empty vote (e.g. retracted selection) — nothing to persist.
+        // Consumed either way — a stray reply shouldn't leave this flag
+        // dangling to misfire against whatever list_reply comes next.
+        $this->personas->setPendingWaterPoll($message->chatId, false);
+
+        $frequency = $this->parseWaterFrequencyReply($message->body);
+        if ($frequency === null) {
             return;
         }
 
-        $frequency = (int)trim($message->body);
         if (!WaterReminderScheduler::isValidFrequency($frequency)) {
             return;
         }
@@ -503,8 +707,84 @@ final class MessageRouter
 
         $this->greenApi->sendMessage(
             $message->chatId,
-            "💧 Listo, te voy a recordar tomar agua {$stored} veces por día entre las 8 y las 20 hs."
+            "💧 Listo, te voy a recordar tomar agua {$stored} veces por día entre las 9 y las 20 hs."
         );
+    }
+
+    private function normalizeReplyCommand(string $body): string
+    {
+        $normalized = mb_strtolower(trim($body), 'UTF-8');
+        $normalized = strtr($normalized, [
+            'á' => 'a',
+            'é' => 'e',
+            'í' => 'i',
+            'ó' => 'o',
+            'ú' => 'u',
+        ]);
+
+        return preg_replace('/\s+/', ' ', $normalized) ?? $normalized;
+    }
+
+    private function mealTypeLabelLower(string $mealType): string
+    {
+        return mb_strtolower(self::BACKDATE_MEAL_LABELS[$mealType] ?? $mealType, 'UTF-8');
+    }
+
+    private function resolveBackdateLocalDatetime(string $date, string $mealType, string $identifier, \DateTimeZone $tzLocal): \DateTime
+    {
+        $today = (new \DateTime('today', $tzLocal))->format('Y-m-d');
+        $nowLocal = new \DateTime('now', $tzLocal);
+        $currentHour = (int)$nowLocal->format('G');
+
+        if ($date === $today && MealWindows::isWithinWindow($mealType, $currentHour)) {
+            return clone $nowLocal;
+        }
+
+        $averageHour = $this->nutrition->findAverageMealHour($identifier, $mealType);
+        $targetHour = $averageHour !== null
+            ? max(MealWindows::startHour($mealType), min(MealWindows::endHour($mealType) - 1, (int)round($averageHour)))
+            : MealWindows::defaultHour($mealType);
+
+        $localDatetime = new \DateTime($date, $tzLocal);
+        $localDatetime->setTime($targetHour, 0);
+
+        return $localDatetime;
+    }
+
+    private function isTodayLocalDate(string $date): bool
+    {
+        $tzLocal = new \DateTimeZone('America/Argentina/Buenos_Aires');
+
+        return $date === (new \DateTime('today', $tzLocal))->format('Y-m-d');
+    }
+
+    private function resolveMealReminderReply(string $body): ?string
+    {
+        return match ($this->normalizeReplyCommand($body)) {
+            self::MEAL_REMINDER_NO_COMI, 'todavia no comi', 'no comi' => self::MEAL_REMINDER_NO_COMI,
+            self::MEAL_REMINDER_DELAYED, 'me retrase' => self::MEAL_REMINDER_DELAYED,
+            self::MEAL_REMINDER_CAPTURE_NOW, 'cargar ahora' => self::MEAL_REMINDER_CAPTURE_NOW,
+            self::MEAL_REMINDER_SALTEADO, 'lo saltee', 'me lo saltee' => self::MEAL_REMINDER_SALTEADO,
+            default => null,
+        };
+    }
+
+    private function parseWaterFrequencyReply(string $body): ?int
+    {
+        $normalized = trim($body);
+        if ($normalized === '') {
+            return null;
+        }
+
+        if (ctype_digit($normalized)) {
+            return (int)$normalized;
+        }
+
+        if (preg_match('/\d+/', $normalized, $matches) === 1) {
+            return (int)$matches[0];
+        }
+
+        return null;
     }
 
     private function handleImage(IncomingMessage $message): void
@@ -541,11 +821,12 @@ final class MessageRouter
             }
             $base64 = base64_encode($imageBytes);
 
-            $analysisText = '';
             try {
                 $analysisText = $this->openAi->analyzeMeal($message->body, $base64, $mealType, $nextMealPhrase);
-            } catch (\Throwable) {
-                // Continue with zeros/empty analysis rather than failing the whole flow.
+            } catch (\Throwable $e) {
+                error_log('Nutri Helper: fallo analizando comida por imagen: ' . $e->getMessage());
+                $this->greenApi->sendMessage($message->chatId, 'No pude analizar esa foto en este momento. Revisá la cuota de OpenAI e intentá de nuevo.');
+                return;
             }
 
             $fileKey = $this->images->store($identifier, $base64);
@@ -558,31 +839,65 @@ final class MessageRouter
     }
 
     /**
-     * Sent by bin/send_meal_reminder.php when someone answers "comí pero me
-     * olvidé de mandar la foto" — they're expected to reply next with a plain
-     * text description of what they ate.
+     * Resolves the missed-meal reminder list/button/text reply. "Cargar
+     * ahora" jumps into the same guided capture flow as the generic
+     * "cargar" command, but prefilled with today's reminded meal.
      */
-    private function handleMissedMealPollVote(IncomingMessage $message, string $mealType): void
+    private function handleMissedMealReply(IncomingMessage $message, string $mealType): void
     {
-        if ($message->body === '') {
+        $selectedId = $this->resolveMealReminderReply($message->body);
+        if ($selectedId === null) {
+            $this->sendMealReminderOptions($message->chatId, $mealType);
             return;
         }
 
         $this->personas->setPendingMealReminder($message->chatId, null);
 
-        if ($message->body === 'Comí, me olvidé de mandar la foto') {
-            $this->personas->setPendingTextMeal($message->chatId, $mealType);
-            $this->greenApi->sendMessage(
+        if ($selectedId === self::MEAL_REMINDER_CAPTURE_NOW) {
+            $tzLocal = new \DateTimeZone('America/Argentina/Buenos_Aires');
+            $this->startBackdateCaptureFlow(
                 $message->chatId,
-                '✍️ Contame por texto qué comiste en ' . MealWindows::skipOptionLabel($mealType)
-                . ' y te calculo los datos igual, sin foto.'
+                (new \DateTime('today', $tzLocal))->format('Y-m-d'),
+                $mealType,
+                'Perfecto, lo cargo igual venga con foto o sin foto.'
             );
             return;
         }
 
-        if ($message->body === 'No comí' || $message->body === MealWindows::skipOptionLabel($mealType)) {
-            $this->greenApi->sendMessage($message->chatId, '¡Todo bien! Cuando comas algo mandame la foto o el texto.');
+        if ($selectedId === self::MEAL_REMINDER_DELAYED) {
+            $this->greenApi->sendMessage(
+                $message->chatId,
+                'Dale. Si terminás haciendo tu ' . $this->mealTypeLabelLower($mealType)
+                . ' más tarde, usá "cargar" y elegí esa comida para que quede bien registrada.'
+            );
+            return;
         }
+
+        if ($selectedId === self::MEAL_REMINDER_NO_COMI) {
+            $this->greenApi->sendMessage(
+                $message->chatId,
+                'Listo. Cuando comas algo, mandame la foto o usá "cargar" si terminó siendo más tarde.'
+            );
+            return;
+        }
+
+        $this->greenApi->sendMessage($message->chatId, 'Listo, no la tomo en cuenta por ahora.');
+    }
+
+    private function sendMealReminderOptions(string $chatId, string $mealType): void
+    {
+        $mealLabel = $this->mealTypeLabelLower($mealType);
+
+        $this->sendButtonsWithFallback(
+            $chatId,
+            '🍽️ ¿Qué pasó con tu ' . $mealLabel . ' de hoy? Todavía no vi que lo registraras.',
+            [
+                ['id' => self::MEAL_REMINDER_NO_COMI, 'text' => 'No comi'],
+                ['id' => self::MEAL_REMINDER_DELAYED, 'text' => 'Me retrase'],
+                ['id' => self::MEAL_REMINDER_CAPTURE_NOW, 'text' => 'Cargar ahora'],
+            ],
+            'Respondé con: No comi, Me retrase o Cargar ahora.'
+        );
     }
 
     /**

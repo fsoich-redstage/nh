@@ -7,6 +7,7 @@ use NutriHelper\Config;
 use NutriHelper\Db\Database;
 use NutriHelper\Domain\EventDeduplicator;
 use NutriHelper\Domain\MealWindows;
+use NutriHelper\Domain\MessageRouter;
 use NutriHelper\Http\GreenApiClient;
 use NutriHelper\Repository\NutritionRepository;
 use NutriHelper\Repository\PersonaRepository;
@@ -15,8 +16,8 @@ Config::load(__DIR__ . '/../.env');
 
 /**
  * Runs hourly via cron. For each active person and each of the 4 meals, asks
- * (once, via poll) "did you forget?" — but only during that meal's own hour
- * window, and only right around when THAT PERSON usually logs it (their
+ * (once, via interactive buttons) "did you forget?" — but only during that meal's own hour
+ * window, and only one hour after when THAT PERSON usually logs it (their
  * historical average hour for that meal, or a sensible default if they don't
  * have history yet). At most one reminder per person per meal per day.
  *
@@ -59,9 +60,7 @@ foreach ($personas->findActivePersonas() as $persona) {
         }
 
         $averageHour = $nutrition->findAverageMealHour($identifier, $mealType);
-        $targetHour = $averageHour !== null && MealWindows::isWithinWindow($mealType, (int)round($averageHour))
-            ? (int)round($averageHour)
-            : MealWindows::defaultHour($mealType);
+        $targetHour = MealWindows::reminderHour($mealType, $averageHour);
 
         if ($currentHour !== $targetHour) {
             continue; // not their moment yet (or already passed) this hour
@@ -71,15 +70,25 @@ foreach ($personas->findActivePersonas() as $persona) {
             continue; // already asked about this meal today
         }
 
-        $options = ['No comí', MealWindows::skipOptionLabel($mealType), 'Comí, me olvidé de mandar la foto'];
         $lowerMeal = mb_strtolower($mealType, 'UTF-8');
 
-        $sendResult = $greenApi->sendPoll(
+        $sendResult = $greenApi->sendInteractiveButtons(
             $chatId,
-            "🍽️ ¿Te olvidaste de mandar tu {$mealType}? Todavía no vi que registraras tu {$lowerMeal} de hoy.",
-            $options,
-            false
+            "🍽️ ¿Qué pasó con tu {$lowerMeal} de hoy? Todavía no vi que lo registraras.",
+            [
+                ['id' => MessageRouter::MEAL_REMINDER_NO_COMI, 'text' => 'No comi'],
+                ['id' => MessageRouter::MEAL_REMINDER_DELAYED, 'text' => 'Me retrase'],
+                ['id' => MessageRouter::MEAL_REMINDER_CAPTURE_NOW, 'text' => 'Cargar ahora'],
+            ]
         );
+
+        if ($sendResult['status'] >= 400) {
+            $sendResult = $greenApi->sendMessage(
+                $chatId,
+                "🍽️ ¿Qué pasó con tu {$lowerMeal} de hoy? Todavía no vi que lo registraras.\n\n"
+                . 'Respondé con: No comi, Me retrase o Cargar ahora.'
+            );
+        }
 
         if ($sendResult['status'] < 400) {
             $personas->setPendingMealReminder($chatId, $mealType);

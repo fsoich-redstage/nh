@@ -4,15 +4,16 @@ declare(strict_types=1);
 namespace NutriHelper\Domain;
 
 /**
- * Spreads N water reminders per day evenly across the 8-20hs window.
+ * Spreads N water reminders per day evenly across the 9-20hs window.
  * Deterministic: given a frequency, the same set of hours is produced every
  * time, so the hourly cron can just ask "does this hour belong to this
  * person's schedule?" without persisting a schedule anywhere.
  */
 final class WaterReminderScheduler
 {
-    public const WINDOW_START_HOUR = 8;
+    public const WINDOW_START_HOUR = 9;
     public const WINDOW_END_HOUR = 20;
+    private const WINDOW_DURATION_HOURS = 12;
     public const MIN_FREQUENCY = 3;
     public const MAX_FREQUENCY = 12;
 
@@ -23,7 +24,7 @@ final class WaterReminderScheduler
     public static function scheduledHours(int $frequency): array
     {
         $frequency = max(1, $frequency);
-        $span = self::WINDOW_END_HOUR - self::WINDOW_START_HOUR;
+        $span = self::WINDOW_DURATION_HOURS;
         $step = $span / $frequency;
 
         $hours = [];

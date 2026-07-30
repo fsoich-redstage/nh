@@ -28,9 +28,10 @@ final class WebhookPayloadNormalizer
         $typeMessage = (string)($messageData['typeMessage'] ?? $messageData['type'] ?? '');
 
         // The top-level idMessage identifies this specific webhook notification
-        // (a poll vote update gets a fresh one each time, unlike pollMessageData's
-        // stanzaId which stays fixed for the poll's whole lifetime), so prefer it
-        // for dedupe purposes across all message types.
+        // (a button/list reply gets a fresh one each time, unlike the
+        // stanzaId inside templateButtonReplyMessage/listResponseMessage,
+        // which stays fixed for the original message's whole lifetime), so
+        // prefer it for dedupe purposes across all message types.
         $idMessage = (string)(
             $root['idMessage']
             ?? $payload['idMessage']
@@ -40,20 +41,26 @@ final class WebhookPayloadNormalizer
             ?? ''
         );
 
-        if ($typeMessage === 'pollUpdateMessage') {
-            $votes = $messageData['pollMessageData']['votes'] ?? [];
-            $selected = '';
-            if (is_array($votes)) {
-                foreach ($votes as $vote) {
-                    $voters = $vote['optionVoters'] ?? [];
-                    if (is_array($voters) && in_array($chatId, $voters, true)) {
-                        $selected = (string)($vote['optionName'] ?? '');
-                        break;
-                    }
-                }
+        if (in_array($typeMessage, [
+            'templateButtonReplyMessage',
+            'templateButtonsReplyMessage',
+            'interactiveButtonReply',
+            'interactiveButtonsReply',
+            'interactiveButtonsResponse',
+            'buttonsResponseMessage',
+        ], true)) {
+            $body = $this->resolveButtonReplyBody($messageData);
+
+            return new IncomingMessage('button_reply', $chatId, $body, '', $idMessage);
+        }
+
+        if ($typeMessage === 'listResponseMessage') {
+            $selectedId = (string)($messageData['listResponseMessage']['singleSelectReply'] ?? '');
+            if ($selectedId === '') {
+                $selectedId = trim((string)($messageData['listResponseMessage']['title'] ?? ''));
             }
 
-            return new IncomingMessage('poll_vote', $chatId, $selected, '', $idMessage);
+            return new IncomingMessage('list_reply', $chatId, $selectedId, '', $idMessage);
         }
 
         if ($typeMessage === 'imageMessage' || $typeMessage === 'image') {
@@ -85,6 +92,7 @@ final class WebhookPayloadNormalizer
             $body = (string)(
                 $messageData['textMessage']
                 ?? $messageData['textMessageData']['textMessage']
+                ?? $messageData['extendedTextMessageData']['text']
                 ?? $messageData['body']
                 ?? ''
             );
@@ -93,5 +101,52 @@ final class WebhookPayloadNormalizer
         }
 
         return new IncomingMessage('other', $chatId, '', '', $idMessage);
+    }
+
+    /**
+     * Green API has shipped multiple reply payload shapes/names for the same
+     * user action; prefer the explicit id, but fall back to display text so
+     * flows still advance when the provider leaves selectedId empty.
+     *
+     * @param array<string,mixed> $messageData
+     */
+    private function resolveButtonReplyBody(array $messageData): string
+    {
+        $replyPayloads = [
+            $messageData['templateButtonReplyMessage'] ?? null,
+            $messageData['templateButtonsReplyMessage'] ?? null,
+            $messageData['interactiveButtonsReply'] ?? null,
+            $messageData['interactiveButtonReply'] ?? null,
+            $messageData['interactiveButtonsResponse'] ?? null,
+            $messageData['buttonsResponseMessage'] ?? null,
+        ];
+
+        foreach ($replyPayloads as $replyPayload) {
+            if (!is_array($replyPayload)) {
+                continue;
+            }
+
+            $selectedId = trim((string)(
+                $replyPayload['selectedId']
+                ?? $replyPayload['buttonId']
+                ?? $replyPayload['selectedButtonId']
+                ?? ''
+            ));
+            if ($selectedId !== '') {
+                return $selectedId;
+            }
+
+            $displayText = trim((string)(
+                $replyPayload['selectedDisplayText']
+                ?? $replyPayload['buttonText']
+                ?? $replyPayload['selectedButtonText']
+                ?? ''
+            ));
+            if ($displayText !== '') {
+                return $displayText;
+            }
+        }
+
+        return '';
     }
 }

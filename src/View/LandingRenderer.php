@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace NutriHelper\View;
 
 /**
- * Renders the two pages the site's front door (public/index.php) can show:
+ * Renders the two pages the site's front door (index.php) can show:
  * the real meal-history "cards" page, and the promotional landing shown for
  * an invalid/empty identifier. Markup, CSS and JS ported as-is from the
  * production index.php — it was already tuned (filters, day separators,
@@ -300,21 +300,21 @@ body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-ser
 @keyframes flashPulse{0%{box-shadow:0 0 0 rgba(255,255,255,0);transform:scale(1)}40%{box-shadow:0 0 18px rgba(255,255,255,.25);transform:scale(1.02)}100%{box-shadow:0 0 0 rgba(255,255,255,0);transform:scale(1)}}
 .btn.flash{animation:flashPulse .35s ease-out}
 .cards{padding:22px 12px 12px}
-.card{background:var(--card-bg);border-radius:var(--btn-radius);box-shadow:0 6px 20px rgba(0,0,0,0.35);border:1px solid var(--border);margin:12px auto;padding:16px 16px 20px;max-width:520px;display:flex;flex-direction:column;gap:10px;scroll-margin-top:var(--header-h)}
-.inner{width:84%;margin:0 auto}
-.header-grid{display:grid;grid-template-columns:1fr auto;grid-template-rows:auto auto;gap:8px 12px;align-items:center}
+.card{background:var(--card-bg);border-radius:var(--btn-radius);box-shadow:0 6px 20px rgba(0,0,0,0.35);border:1px solid var(--border);margin:12px auto;padding:16px 16px 20px;max-width:520px;display:flex;flex-direction:column;gap:10px;scroll-margin-top:var(--header-h);min-width:0;overflow:hidden}
+.inner{width:84%;margin:0 auto;min-width:0}
+.header-grid{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;gap:8px 12px;align-items:center}
 .header-el{font-size:1.05rem;font-weight:800;letter-spacing:.3px}
-.fecha{grid-column:1;grid-row:1;text-transform:uppercase}
-.comida{grid-column:1;grid-row:2;margin:0;font-weight:800;letter-spacing:.2px}
+.fecha{grid-column:1;grid-row:1;text-transform:uppercase;min-width:0}
+.comida{grid-column:1;grid-row:2;margin:0;font-weight:800;letter-spacing:.2px;min-width:0}
 .pill{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:6px 12px;border-radius:10px;line-height:1;font-weight:800;font-size:1.05rem;white-space:nowrap;height:32px;min-width:120px;box-shadow:var(--shadow1);backdrop-filter:saturate(140%) blur(4px);border:1px solid transparent}
 .pill svg{width:18px;height:18px;display:block}
 .pill-dia{grid-column:2;grid-row:1;background:linear-gradient(180deg,#232323,#1a1a1a);border:1px solid #555;color:#eaeaea}
 .pill-time{grid-column:2;grid-row:2;background:var(--desayuno);color:#000;border-color:rgba(0,0,0,.35)}
 .ampm{font-size:.78em;opacity:.9;margin-left:2px;font-weight:800}
 .card img{width:84%;height:auto;border-radius:10px;border:1px solid var(--border);margin:0 auto;display:block;box-shadow:0 8px 24px rgba(0,0,0,.35)}
-.descripcion{margin:8px auto 0;padding:8px 14px;width:84%;border-radius:10px;font-weight:800;letter-spacing:.2px;line-height:1.25;font-size:1.05rem;text-align:center;border:1px solid rgba(0,0,0,.3);box-shadow:0 2px 6px rgba(0,0,0,.25)}
-.macros{width:84%;margin:8px auto 0;display:grid;grid-template-columns:repeat(2,1fr);gap:8px;align-items:stretch}
-.macro-pill{display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 10px;height:34px;width:100%;border-radius:10px;font-weight:700;font-size:.92rem;line-height:1;text-align:center;background:linear-gradient(180deg,#202020,#171717);border:1px solid var(--border);color:#eaeaea;white-space:nowrap}
+.descripcion{margin:8px auto 0;padding:8px 14px;width:84%;border-radius:10px;font-weight:800;letter-spacing:.2px;line-height:1.25;font-size:1.05rem;text-align:center;border:1px solid rgba(0,0,0,.3);box-shadow:0 2px 6px rgba(0,0,0,.25);overflow-wrap:anywhere}
+.macros{width:84%;margin:8px auto 0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-items:stretch}
+.macro-pill{display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 10px;min-height:34px;width:100%;min-width:0;border-radius:10px;font-weight:700;font-size:.92rem;line-height:1.1;text-align:center;background:linear-gradient(180deg,#202020,#171717);border:1px solid var(--border);color:#eaeaea;white-space:normal;overflow-wrap:anywhere}
 .macro-pill .emoji{font-size:.95rem;line-height:1}
 .theme-desayuno .comida{color:var(--desayuno)}
 .theme-almuerzo .comida{color:var(--almuerzo)}
@@ -329,7 +329,8 @@ body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-ser
 .footer{margin:16px 0 32px;text-align:center;color:#cfcfcf;font-size:.95rem}
 .footer .muted{color:#9a9a9a}
 @media(max-width:680px){.btnrow.meals{grid-template-columns:repeat(2,1fr)}.btnrow.ctrls{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:600px){.cards{padding:20px 10px 10px}.card{margin:10px auto;padding:14px}.header-el,.pill,.descripcion{font-size:1rem}.pill{padding:5px 10px;height:30px;min-width:110px}.inner,.card img,.descripcion,.macros{width:90%}.macro-pill{height:36px;font-size:.96rem}.day-sep{padding:14px 0}.day-sep::before{width:94%}}
+@media(max-width:600px){.cards{padding:20px 10px 10px}.card{margin:10px auto;padding:14px}.header-el,.pill,.descripcion{font-size:1rem}.pill{padding:5px 10px;height:30px;min-width:110px}.inner,.card img,.descripcion,.macros{width:90%}.macro-pill{font-size:.96rem;padding:7px 8px}.day-sep{padding:14px 0}.day-sep::before{width:94%}}
+@media(max-width:420px){.macros{grid-template-columns:1fr}.macro-pill{font-size:.94rem}}
 html, body { width: 100%; max-width: 100%; overflow-x: hidden; overscroll-behavior-x: none; }
 img, video, canvas { max-width: 100%; height: auto; display: block; }
 CSS;

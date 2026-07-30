@@ -14,8 +14,8 @@ final class PersonaRepository
     public const ONBOARDING_DONE = 'done';
 
     // Steps of the "cargar" backdated-meal flow (persona.pending_backdate_step):
-    // awaiting_day -> user picked "cargar", waiting for the day-offset poll vote
-    // awaiting_meal -> day chosen, waiting for the meal-type poll vote
+    // awaiting_day -> user picked "cargar", waiting for the day-offset list reply
+    // awaiting_meal -> day chosen, waiting for the meal-type list reply
     // awaiting_content -> meal type chosen, waiting for the photo/text itself
     public const BACKDATE_AWAITING_DAY = 'awaiting_day';
     public const BACKDATE_AWAITING_MEAL = 'awaiting_meal';
@@ -95,7 +95,7 @@ final class PersonaRepository
 
     /**
      * Every persona with their full contact info plus meal-count/last-activity
-     * stats — backs the admin panel's user list (public/admin/index.php).
+     * stats — backs the admin panel's user list (admin/index.php).
      * Ordered with the most recently active people first, and anyone who
      * never logged a meal at the bottom.
      *
@@ -120,7 +120,7 @@ final class PersonaRepository
 
     /**
      * Full contact info for one identifier — backs the admin panel's
-     * per-user detail page (public/admin/persona.php).
+     * per-user detail page (admin/persona.php).
      *
      * @return array<string,mixed>|null
      */
@@ -204,10 +204,16 @@ final class PersonaRepository
 
         $value = $frequency === 0 ? null : $frequency;
 
-        $update = $this->conn->prepare('UPDATE persona SET water_frequency = ? WHERE `number` = ?');
-        $update->execute([$value, $number]);
+        foreach (['water_frequency', 'setting'] as $column) {
+            try {
+                $update = $this->conn->prepare("UPDATE persona SET {$column} = ? WHERE `number` = ?");
+                $update->execute([$value, $number]);
+                return $value;
+            } catch (\Throwable) {
+            }
+        }
 
-        return $value;
+        return null;
     }
 
     public function getWaterFrequency(string $chatId): ?int
@@ -217,11 +223,18 @@ final class PersonaRepository
             return null;
         }
 
-        $stmt = $this->conn->prepare('SELECT water_frequency FROM persona WHERE `number` = ? LIMIT 1');
-        $stmt->execute([$number]);
-        $value = $stmt->fetchColumn();
+        foreach (['water_frequency', 'setting'] as $column) {
+            try {
+                $stmt = $this->conn->prepare("SELECT {$column} FROM persona WHERE `number` = ? LIMIT 1");
+                $stmt->execute([$number]);
+                $value = $stmt->fetchColumn();
 
-        return ($value !== false && $value !== null) ? (int)$value : null;
+                return ($value !== false && $value !== null) ? (int)$value : null;
+            } catch (\Throwable) {
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -393,13 +406,20 @@ final class PersonaRepository
      */
     public function findWaterReminderRecipients(): array
     {
-        $stmt = $this->conn->query(
-            'SELECT `number`, name, shortname, identifier, water_frequency
-             FROM persona
-             WHERE water_frequency IS NOT NULL AND water_frequency > 0'
-        );
+        foreach (['water_frequency', 'setting'] as $column) {
+            try {
+                $stmt = $this->conn->query(
+                    "SELECT `number`, name, shortname, identifier, {$column} AS water_frequency
+                     FROM persona
+                     WHERE {$column} IS NOT NULL AND {$column} > 0"
+                );
 
-        return $stmt->fetchAll();
+                return $stmt->fetchAll();
+            } catch (\Throwable) {
+            }
+        }
+
+        return [];
     }
 
     /**
@@ -417,10 +437,47 @@ final class PersonaRepository
     }
 
     /**
-     * Which meal type's "did you forget?" poll is currently outstanding for
-     * this chat, if any — set right before sending that poll, cleared once
-     * the vote is processed. Distinguishes this poll from the water-frequency
-     * one when a poll_vote webhook comes in.
+     * Whether this chat currently has an unanswered water-frequency list
+     * message pending — set right before sending it, cleared once a reply
+     * comes in (or once any other command is dispatched). Needed because,
+     * unlike the meal-reminder/backdate flows, a water-frequency list_reply
+     * carries a bare number as its rowId with nothing else to key off of.
+     */
+    public function getPendingWaterPoll(string $chatId): bool
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return false;
+        }
+
+        try {
+            $stmt = $this->conn->prepare('SELECT pending_water_poll FROM persona WHERE `number` = ? LIMIT 1');
+            $stmt->execute([$number]);
+
+            return (bool)$stmt->fetchColumn();
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    public function setPendingWaterPoll(string $chatId, bool $pending): void
+    {
+        $number = self::normalizePhone($chatId);
+        if ($number === '') {
+            return;
+        }
+
+        try {
+            $stmt = $this->conn->prepare('UPDATE persona SET pending_water_poll = ? WHERE `number` = ?');
+            $stmt->execute([$pending ? 1 : 0, $number]);
+        } catch (\Throwable) {
+        }
+    }
+
+    /**
+     * Which meal type's "did you forget?" reminder is currently outstanding
+     * for this chat, if any — set right before sending the interactive
+     * buttons, cleared once the reply is processed.
      */
     public function getPendingMealReminder(string $chatId): ?string
     {

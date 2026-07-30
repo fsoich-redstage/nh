@@ -10,6 +10,8 @@ namespace NutriHelper\Domain;
  */
 final class MealWindows
 {
+    private const REMINDER_DELAY_HOURS = 1;
+
     private const WINDOWS = [
         'DESAYUNO' => ['start' => 8, 'end' => 12, 'default_hour' => 9],
         'ALMUERZO' => ['start' => 12, 'end' => 15, 'default_hour' => 13],
@@ -78,6 +80,27 @@ final class MealWindows
     public static function defaultHour(string $mealType): int
     {
         return self::WINDOWS[$mealType]['default_hour'] ?? 12;
+    }
+
+    public static function reminderHour(string $mealType, ?float $averageHour): int
+    {
+        $baseHour = $averageHour !== null && self::isWithinWindow($mealType, (int)round($averageHour))
+            ? (int)round($averageHour)
+            : self::defaultHour($mealType);
+        $delayedHour = $baseHour + self::REMINDER_DELAY_HOURS;
+
+        if ($mealType === 'CENA') {
+            if ($baseHour >= self::startHour('CENA')) {
+                return min(23, $delayedHour);
+            }
+
+            return min(self::startHour('DESAYUNO') - 1, $delayedHour);
+        }
+
+        return max(
+            self::startHour($mealType),
+            min(self::endHour($mealType) - 1, $delayedHour)
+        );
     }
 
     public static function nextMealPhrase(string $mealType): string

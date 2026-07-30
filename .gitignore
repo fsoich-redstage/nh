@@ -4,6 +4,6 @@
 !/storage/locks/.gitkeep
 /logs/*
 !/logs/.gitkeep
-/public/photos/*
-!/public/photos/.gitkeep
+/photos/*
+!/photos/.gitkeep
 *.log
